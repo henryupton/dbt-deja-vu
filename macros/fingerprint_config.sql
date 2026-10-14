@@ -39,7 +39,9 @@
   row. Per deploy and node the latest real verdict counts; a `skipped` row stands only when the node recorded no
   verdict in that deploy, and `pending` only when nothing else exists. A verdict is measured against the deploy's
   snapshot, so it is cumulative over every step and retry of the deploy, and a later skip wrote nothing. Nothing
-  updates or deletes, so threads finishing together never queue on a table lock.
+  updates or deletes, so threads finishing together never queue on a table lock. Verdict and skip rows carry
+  sql_hash, the md5 of the node's compiled SQL (fingerprint_sql_hash); a ledger created before that column gains it
+  at the next registration.
 #}
 
 {# A var as a bool on both engines. dbt-core's macro environment leaves `as_bool` as identity, so "false" would be truthy. #}
@@ -218,6 +220,24 @@
   {{ return(none) }}
 {% endmacro %}
 
+{#
+  md5 of the node's compiled SQL, the text its materialization runs: every macro it calls, var it renders and
+  ephemeral it reads, rendered. None when the node carries no compiled SQL (graph nodes on Fusion do not; the model
+  in a materialization or hook context does, the same text as `sql`). Hashed in Jinja, so arbitrary SQL text never
+  has to survive a Snowflake string literal. The guard compares it with the hash at the node's last build.
+#}
+{% macro fingerprint_sql_hash(node) %}
+  {%- if node is none or local_md5 is not defined -%}
+    {{ return(none) }}
+  {%- endif -%}
+  {%- set code = node.compiled_code if (node.compiled_code is defined and node.compiled_code is not none)
+      else (node.compiled_sql if (node.compiled_sql is defined and node.compiled_sql is not none) else none) -%}
+  {%- if code is none or (code | string | trim) == '' -%}
+    {{ return(none) }}
+  {%- endif -%}
+  {{ return(local_md5(code | string)) }}
+{% endmacro %}
+
 {# SQL literal helpers: none -> null, strings quoted and escaped, everything else as-is. #}
 {% macro fingerprint_lit(value) %}
   {%- if value is none -%}
@@ -362,8 +382,13 @@
       buckets_changed   number,
       pre_shape         varchar,
       post_shape        varchar,
-      checksum          varchar
+      checksum          varchar,
+      sql_hash          varchar
     )") -%}
+  {# A 0.0.1 ledger predates sql_hash. SHOW is metadata-only, so the steady state issues no DDL against a shared ledger. #}
+  {%- if run_query("show columns like 'SQL_HASH' in table " ~ node_rel).rows | length == 0 -%}
+    {%- do run_query("alter table " ~ node_rel ~ " add column if not exists sql_hash varchar") -%}
+  {%- endif -%}
   {%- do run_query("
     create table if not exists " ~ seg_rel ~ " (
       deploy_id   varchar,

@@ -30,6 +30,8 @@
 
   Everything except unchanged, appended and skipped blocks a child's skip. A node skipped earlier
   in the deploy and built in a later step still records its verdict, which then outranks the skip.
+  The verdict row also records sql_hash, the md5 of the compiled SQL this build ran
+  (fingerprint_sql_hash); the guard compares it at the node's next build.
 
   METADATA$ROW_LAST_COMMIT_TIME names the rows this build wrote. When they are a subset of the
   table only their loaded_at months are hashed; when every row was rewritten (truncate + insert,
@@ -244,7 +246,7 @@
   {%- do run_query(
       "insert into " ~ node_rel
       ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, finished_at,"
-      ~ " replaced, pre_rows, post_rows, watermark, appended_rows, touched_rows, touched_old_rows, buckets_hashed, buckets_changed, pre_shape, post_shape, checksum)"
+      ~ " replaced, pre_rows, post_rows, watermark, appended_rows, touched_rows, touched_old_rows, buckets_hashed, buckets_changed, pre_shape, post_shape, checksum, sql_hash)"
       ~ " select deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column,"
       ~ " " ~ dbt_deja_vu.fingerprint_lit(out.verdict)
       ~ ", " ~ dbt_deja_vu.fingerprint_lit(out.detail)
@@ -261,6 +263,7 @@
       ~ ", pre_shape"
       ~ ", " ~ dbt_deja_vu.fingerprint_lit(out.post_shape)
       ~ ", checksum"
+      ~ ", " ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_sql_hash(model))
       ~ " from " ~ node_rel ~ key ~ " and verdict = 'pending'") -%}
   {%- do log("fingerprint: " ~ relation ~ " => " ~ out.verdict ~ (" (" ~ out.detail ~ ")" if out.detail else ""), info=true) -%}
 

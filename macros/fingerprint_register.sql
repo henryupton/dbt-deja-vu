@@ -5,15 +5,16 @@
   compile, docs generate, show and test fire on-run-start too, and a registration there would
   sit pending for good and block every child.
 
-  Creates the ledger if missing, then appends one `pending` row per selected model, seed or
-  snapshot with the deploy id, its parents, its current column shape, its source checksum and
-  `snapshot_at`, Snowflake's clock at run start. The post-hook (fingerprint_post) reads the
-  pre-build table through Time Travel at that anchor, so it is deliberately the database clock
-  and not dbt's run_started_at. A node already registered for this deploy id (an earlier step of
-  the same deploy) is left alone. Ephemeral models are not registered: they have no relation and
-  run no hooks, so they could never leave `pending`; their descendants list the ephemeral's own
-  parents instead. Nor are nodes whose materialization is in fingerprint_exclude_materializations
-  (types that never run hooks); a child of one never skips.
+  Creates the ledger if missing (and adds sql_hash to a 0.0.1 ledger), then appends one `pending`
+  row per selected model, seed or snapshot with the deploy id, its parents, its current column
+  shape, its source checksum and `snapshot_at`, Snowflake's clock at run start. The pending row
+  carries no sql_hash: nodes are not compiled yet, so the post-hook and the skip record it. The
+  post-hook (fingerprint_post) reads the pre-build table through Time Travel at that anchor, so it
+  is deliberately the database clock and not dbt's run_started_at. A node already registered for
+  this deploy id (an earlier step of the same deploy) is left alone. Ephemeral models are not
+  registered: they have no relation and run no hooks, so they could never leave `pending`; their
+  descendants list the ephemeral's own parents instead. Nor are nodes whose materialization is in
+  fingerprint_exclude_materializations (types that never run hooks); a child of one never skips.
 
   The insert goes in statements of at most fingerprint_register_batch_size rows (default 200):
   Snowflake cannot retry a statement over 1 MB, and each row carries the node's column shape.

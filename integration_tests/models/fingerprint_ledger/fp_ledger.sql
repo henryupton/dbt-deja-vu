@@ -2,7 +2,7 @@
     config(
         materialized='view',
         enabled=(var('fingerprint', false) | string | lower) in ['true', '1'],
-        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge', 'fp_knob']
+        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge', 'fp_knob', 'fp_sql']
     )
 }}
 
@@ -56,6 +56,10 @@
 -- depends_on: {{ ref('fp_knob_wallclock') }}
 -- depends_on: {{ ref('fp_knob_scd2') }}
 -- depends_on: {{ ref('fp_knob_child_of_scd2') }}
+-- depends_on: {{ ref('fp_sql_parent') }}
+-- depends_on: {{ ref('fp_sql_child') }}
+-- depends_on: {{ ref('fp_sql_child_of_macro') }}
+-- depends_on: {{ ref('fp_sql_child_of_var') }}
 {% if var('fp_enable_late_child', false) %}
 -- depends_on: {{ ref('fp_child_late') }}
 {% endif %}

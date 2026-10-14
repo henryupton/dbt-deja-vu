@@ -4,20 +4,24 @@
   fingerprint_should_skip() answers "may this node's build be skipped?" from the ledger: true only
   when `fingerprint_skip_unchanged_upstream` is on, at least one parent is registered in this
   deploy, every registered parent finished `unchanged`, `appended` or `skipped`, and the node's
-  own source checksum matches the one recorded at its last fingerprinted build of this relation.
-  A parent that is `pending`, `new`, `modified`, `unhashable` or `error` blocks. Ephemeral parents
-  are looked through to their own parents. A node with no parents, none registered in this
-  deploy, or no fingerprinted build of this relation on record is never skipped: the guard cannot
-  tell why it is being built. Nor is a node whose own SQL changed, however its parents came out;
-  the parents say nothing about that. Nor is a node, or a child of one, whose materialization is
-  in fingerprint_exclude_materializations: it carries no verdict, so whether it was rebuilt is
-  unknown. Nor is a node whose meta sets `fingerprint_skip: false`, for output that moves when its
-  parents do not (a model reading the wall clock); it is still registered and fingerprinted, so
-  its own children read its verdict as usual.
+  own source checksum and compiled SQL hash match the ones recorded at its last fingerprinted
+  build of this relation. A parent that is `pending`, `new`, `modified`, `unhashable` or `error`
+  blocks. Ephemeral parents are looked through to their own parents. A node with no parents, none
+  registered in this deploy, or no fingerprinted build of this relation on record is never
+  skipped: the guard cannot tell why it is being built. Nor is a node whose own SQL changed,
+  however its parents came out; the parents say nothing about that. Nor is a node, or a child of
+  one, whose materialization is in fingerprint_exclude_materializations: it carries no verdict,
+  so whether it was rebuilt is unknown. Nor is a node whose meta sets `fingerprint_skip: false`,
+  for output that moves when its parents do not (a model reading the wall clock); it is still
+  registered and fingerprinted, so its own children read its verdict as usual.
 
-  The checksum is the node's own source file, so a change that alters its output only through a
-  macro it calls, a var, or YAML-only config leaves the checksum equal and the guard cannot see
-  it. Deploy such a change with `fingerprint_skip_unchanged_upstream` off.
+  The checksum is the node's own source file; the compiled SQL hash (fingerprint_sql_hash) also
+  covers every macro it calls, var it renders and ephemeral it reads. A baseline with no hash
+  (written by 0.0.1) never skips, nor does a node with no compiled SQL in context, nor SQL that
+  renders a run-varying value (invocation_id, run start time), which is what a model rendering
+  the clock needs. Config that changes how the materialization writes without changing the SQL
+  (a unique_key set in YAML) moves neither; deploy it with `fingerprint_skip_unchanged_upstream`
+  off.
 
   A parent's verdict is its latest real verdict in the deploy; a `skipped` row stands only when
   the parent recorded no verdict in that deploy (see fingerprint_latest_row).
@@ -27,15 +31,17 @@
   deploy. The ledger since the node's last fingerprinted build or skip covers what it recorded;
   three records there build the node: a parent verdict whose snapshot predates that build (the
   parent was rebuilt after the node read it); a blocking verdict or a `pending` row for a parent in
-  another deploy (a change the node never read); and a registration of the node under other SQL
-  that recorded no verdict (a build whose hooks failed after the table was written).
+  another deploy (a change the node never read); and a registration of the node under another
+  checksum that recorded no verdict (a build whose hooks failed after the table was written).
+  Registration precedes compilation, so it carries no compiled SQL hash to compare.
 
   Writes the ledger never saw, from a run with the fingerprint off, are invisible to the guard. A
   run that builds parents and their children together leaves them in step. After one that rebuilt
-  a parent without its children, or built the node under other SQL, deploy with
+  a parent without its children, or built the node under other compiled SQL, deploy with
   `fingerprint_skip_unchanged_upstream` off.
 
-  fingerprint_mark_skipped() appends the skip so the node's own children can read it.
+  fingerprint_mark_skipped() appends the skip so the node's own children can read it. The skip row
+  carries the node's compiled SQL hash too, since it is the baseline the node's next build reads.
 
   These are plain macros for a materialization to call; nothing in this package calls them.
 #}
@@ -96,7 +102,7 @@
   {%- set rel_lit = dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_relation_name(node)) -%}
   {%- set base = run_query(
       "select checksum, deploy_id, to_char(finished_at, 'YYYY-MM-DD HH24:MI:SS.FF9 TZHTZM'),"
-      ~ " to_char(registered_at, 'YYYY-MM-DD HH24:MI:SS.FF9 TZHTZM') from " ~ node_rel
+      ~ " to_char(registered_at, 'YYYY-MM-DD HH24:MI:SS.FF9 TZHTZM'), sql_hash from " ~ node_rel
       ~ " where node_id = " ~ node_lit ~ " and relation_name = " ~ rel_lit
       ~ " and verdict <> 'pending'"
       ~ " order by finished_at desc nulls last, registered_at desc limit 1") -%}
@@ -109,9 +115,23 @@
     {{ return(false) }}
   {%- endif -%}
 
+  {# What the node renders, which its checksum cannot see into. A missing hash on either side never matches. #}
+  {%- set current_sql = dbt_deja_vu.fingerprint_sql_hash(node) -%}
+  {%- set base_sql = base.rows[0][4] -%}
+  {%- if current_sql is none -%}
+    {%- do log("fingerprint: " ~ node.name ~ " has no compiled SQL to hash; building", info=true) -%}
+    {{ return(false) }}
+  {%- elif base_sql is none -%}
+    {%- do log("fingerprint: " ~ node.name ~ " has no compiled SQL hash at its last build in deploy " ~ base.rows[0][1] ~ "; building", info=true) -%}
+    {{ return(false) }}
+  {%- elif current_sql != base_sql -%}
+    {%- do log("fingerprint: " ~ node.name ~ " compiled SQL differs from its last build in deploy " ~ base.rows[0][1] ~ "; building", info=true) -%}
+    {{ return(false) }}
+  {%- endif -%}
+
   {#
     The ledger since the node's last build or skip (`since`). unseen: a later registration of this relation under
-    other SQL with no verdict. moved, per parent and deploy on the row that counts: a verdict whose snapshot
+    another checksum with no verdict. moved, per parent and deploy on the row that counts: a verdict whose snapshot
     predates `since` (the parent was rebuilt after the node read it), or a blocking verdict or pending row in
     another deploy. This deploy's own verdicts after its snapshot are the ones checked above.
   #}
@@ -128,7 +148,7 @@
       ~ " where (deploy_id <> " ~ deploy_lit ~ " and verdict in " ~ blocking_in ~ ")"
       ~ " or (verdict not in ('pending', 'skipped') and snapshot_at < " ~ since ~ ")) as moved").rows[0] -%}
   {%- if later[0] | int > 0 -%}
-    {%- do log("fingerprint: " ~ node.name ~ " was registered under other SQL since its last build and recorded no verdict; building", info=true) -%}
+    {%- do log("fingerprint: " ~ node.name ~ " was registered under another checksum since its last build and recorded no verdict; building", info=true) -%}
     {{ return(false) }}
   {%- elif later[1] | int > 0 -%}
     {%- do log("fingerprint: " ~ node.name ~ " has " ~ (later[1] | int) ~ " parent verdict(s) since its last build that this deploy's verdicts do not cover; building", info=true) -%}
@@ -136,9 +156,9 @@
   {%- endif -%}
 
   {%- if current is none -%}
-    {%- do log("fingerprint: " ~ node.name ~ " has no checksum on either side; skipping on parent verdicts alone", info=true) -%}
+    {%- do log("fingerprint: " ~ node.name ~ " has no checksum on either side; skipping on parent verdicts and compiled SQL", info=true) -%}
   {%- else -%}
-    {%- do log("fingerprint: " ~ node.name ~ " parents registered=" ~ registered ~ " blocking=0, checksum unchanged; may skip", info=true) -%}
+    {%- do log("fingerprint: " ~ node.name ~ " parents registered=" ~ registered ~ " blocking=0, checksum and compiled SQL unchanged; may skip", info=true) -%}
   {%- endif -%}
   {{ return(true) }}
 {% endmacro %}
@@ -153,8 +173,9 @@
       ~ " and node_id = " ~ dbt_deja_vu.fingerprint_lit(node.unique_id) -%}
   {%- do run_query(
       "insert into " ~ node_rel
-      ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, finished_at, pre_shape, checksum)"
+      ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, finished_at, pre_shape, checksum, sql_hash)"
       ~ " select deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column,"
-      ~ " 'skipped', " ~ dbt_deja_vu.fingerprint_lit(detail) ~ ", registered_at, current_timestamp(), pre_shape, checksum"
+      ~ " 'skipped', " ~ dbt_deja_vu.fingerprint_lit(detail) ~ ", registered_at, current_timestamp(), pre_shape, checksum, "
+      ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_sql_hash(node))
       ~ " from " ~ node_rel ~ key ~ " and verdict = 'pending'") -%}
 {% endmacro %}

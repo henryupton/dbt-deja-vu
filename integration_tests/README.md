@@ -35,13 +35,14 @@ The `fp_edp` group (scenarios 33 to 38) holds common warehouse shapes:
 - **`fp_seed_live`** - a seed with `_loaded_at` whose CSV the runner rewrites in scenario 37 so a reload
   carries changed content and reads `modified`. The runner restores the committed CSVs when it exits.
 
-The guard also refuses to skip a node whose own source checksum differs from its last fingerprinted
-build of the same relation. Fixture model SQL is steered by vars, not edits, so guarded checksums never
-move between scenarios except where a scenario means them to: the runner rewrites two seed CSVs and one
-guarded model (`fp_edge_child_multi`, in scenarios 46 and 54) and restores them when it exits; a variant
-a killed run left behind is recognised at start and the committed copy restored from git. Every group's
-first scenario builds each guarded child, so the expected verdicts hold from the first run on a fresh
-schema and on every rerun.
+The guard also refuses to skip a node whose own source checksum, or whose compiled SQL hash, differs
+from its last fingerprinted build of the same relation. Fixture model SQL is steered by vars, not edits,
+and no guarded fixture renders a var that moves, so guarded checksums and hashes never move between
+scenarios except where a scenario means them to: the runner rewrites two seed CSVs, one guarded model
+(`fp_edge_child_multi`, in scenarios 46 and 54) and one macro a guarded model renders (`fp_sql_expr`, from
+scenario 66) and restores them when it exits; a variant a killed run left behind is recognised at start
+and the committed copy restored from git. Every group's first scenario builds each guarded child, so the
+expected verdicts hold from the first run on a fresh schema and on every rerun.
 
 The `fp_edge` group (scenarios 39 to 57) holds the guard's remaining branches and the hooks' edge cases:
 
@@ -84,7 +85,7 @@ Scenarios 56 and 57 replace `fp_edge_parent_a` in a deploy that selects none of 
 run the whole group: the parent reads `unchanged` there, and its children still build on the other
 deploy's `new`, which arrived after their last build.
 
-The `fp_knob` group (scenarios 58 onwards) holds the vars a project sets to fit the fingerprint to its own
+The `fp_knob` group (scenarios 58 to 63) holds the vars a project sets to fit the fingerprint to its own
 deploy:
 
 - **`fp_knob_parent`** and **`fp_knob_child`** - a merge parent that stays unchanged after the group's
@@ -108,6 +109,20 @@ deploy:
 - **63** - `fingerprint_register_batch_size` 1, over two steps of one deploy: every register statement carries
   one row, and the second step's batches for the first step's nodes insert nothing.
 
+The `fp_sql` group (scenarios 64 onwards) holds what moves a guarded child's output without moving its
+checksum:
+
+- **`fp_sql_parent`** - a merge parent that stays unchanged after the group's initial. Its pre-hook
+  (`fp_sql_legacy_row_hook`) can append a hashless copy of a child's latest build row, as 0.0.1 wrote it.
+- **`fp_sql_child`** - the control, a guarded child that renders nothing that moves.
+- **`fp_sql_child_of_macro`** - a guarded child that renders `fp_sql_status_expr` (`macros/fp_sql_expr.sql`).
+- **`fp_sql_child_of_var`** - a guarded child that renders the `fp_sql_label` var into its SQL.
+- **65** - nothing changed: every child skips, so the post-hook and the guard hash the same text.
+- **66** - the runner rewrites the macro (`upper` to `lower`): only its child builds.
+- **67** - `fp_sql_label` changes: only its child builds.
+- **68** - a hashless row planted as the control's latest build: the control builds.
+- **69** - nothing changed again: every child skips on the hashes recorded since.
+
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
 `fp_source` picks a seed (a fixture may pass its own), `fp_upper_email` / `fp_null_email_customer` change values below the
 watermark, `fp_extra_column` / `fp_drop_column` change the shape, `fp_duplicate_rows`,
@@ -120,7 +135,7 @@ dbt deps
 ```
 
 ```bash
-# Sixty-three ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Sixty-nine ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

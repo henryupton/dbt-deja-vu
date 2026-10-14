@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 63 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 69 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -26,12 +26,15 @@ Scenario 55 skips a guarded child in one step and rebuilds it in the next, once 
 replaced a parent; the rebuild records new.
 Scenarios 56 and 57 replace a parent in a deploy that builds none of its guarded children; the next
 deploy builds them on that verdict, though the parent reads unchanged there.
-Scenarios 58 onwards are the package knobs. A step may name its command (default build): scenario 59
+Scenarios 58 to 63 are the package knobs. A step may name its command (default build): scenario 59
 compiles with the fingerprint on, which must register nothing. Scenario 60 excludes a hookless
 materialization, which is never registered and whose guarded child always builds. Scenario 61 opts a
 guarded child out of skipping with meta fingerprint_skip false. Scenario 62 closes an scd row, which
 reads modified under the default; scenarios 4 and 48 set fingerprint_exclude_scd_columns true to pin
 the opt-in. Scenario 63 registers one row per statement across two steps of one deploy.
+Scenarios 64 onwards are the compiled-SQL check: a rewritten macro (66) and a var (67) move a
+guarded child's compiled SQL with its checksum equal, and it builds; a hashless 0.0.1 ledger row
+as the latest build never lets a child skip (68); with nothing changed every child skips (65, 69).
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -55,9 +58,11 @@ GUARD = "tag:fp_guard"
 EDP = "tag:fp_edp"
 EDGE = "tag:fp_edge"
 KNOB = "tag:fp_knob"
+SQL = "tag:fp_sql"
 
 # Files the runner rewrites mid-sequence: seeds so a reload carries changed content, one guarded model so
-# its checksum moves while its parents stay put. A variant stays in place for the scenarios that follow;
+# its checksum moves while its parents stay put, and one macro a guarded model renders so its compiled SQL
+# moves while its checksum stays put. A variant stays in place for the scenarios that follow;
 # the committed originals are restored when the runner exits. A variant left behind by a killed run is
 # recognised at start and the committed copy is taken from git instead.
 SEED_LIVE = "seeds/fingerprint/fp_seed_live.csv"
@@ -80,6 +85,16 @@ CHILD_MULTI_SELECT = (
     "join {{ ref('fp_edge_parent_b') }} b on a.customer_id = b.customer_id\n"
 )
 CHILD_MULTI_CHANGE = "{# Rewritten by the runner: this comment is the change. #}\n"
+# A macro a guarded child renders: rewriting it moves the child's compiled SQL and output, not its checksum.
+SQL_MACRO = "macros/fp_sql_expr.sql"
+SQL_MACRO_HEAD = (
+    "{#\n"
+    "  Test-only: the status expression fp_sql_child_of_macro renders. The runner rewrites this file in scenario 66,\n"
+    "  so the child's compiled SQL and output move while its own file, and so its checksum, stay put.\n"
+    "#}\n"
+    "{% macro fp_sql_status_expr(column) %}\n"
+)
+SQL_MACRO_TAIL = "{% endmacro %}\n"
 FILE_VARIANTS = {
     SEED_LIVE: {
         # customer 3 flips INACTIVE -> ACTIVE with the same timestamps
@@ -113,6 +128,10 @@ FILE_VARIANTS = {
             + CHILD_MULTI_SELECT
         ),
     },
+    SQL_MACRO: {
+        # upper(status) becomes lower(status): every status value changes
+        "changed": SQL_MACRO_HEAD + "  {{ return('lower(' ~ column ~ ')') }}\n" + SQL_MACRO_TAIL,
+    },
 }
 
 # Fixture state after scenario 14, reused by the later groups so they start from a known shape.
@@ -130,6 +149,9 @@ SCD2_PAIR = "fp_edge_scd2 fp_edge_child_of_scd2 fp_ledger"
 # The package-knob group: the vars a project sets to fit the fingerprint to its own deploy.
 KNOB_VARS = {**STEADY, "fingerprint_exclude_materializations": ["hookless_table"]}
 KNOB_62 = {**KNOB_VARS, "fp_knob_scd_source": "versioned"}
+
+# The compiled-SQL group: the var change of 67 carries into the scenarios after it, as the macro variant of 66 does.
+SQL_67 = {**STEADY, "fp_sql_label": "changed"}
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -289,6 +311,20 @@ SCENARIOS = [
              dict(select="fp_knob_parent fp_knob_scd2", vars={**KNOB_62, "fingerprint_register_batch_size": 1}),
              dict(select=KNOB, vars={**KNOB_62, "fingerprint_register_batch_size": 1}),
          ]),
+    # --- compiled SQL: what moves a guarded child's output without moving its checksum ---------------------
+    dict(id=64, desc="sql: initial, create or replace everywhere", select=SQL, flags=["--full-refresh"], vars=STEADY),
+    # Also proves the post-hook and the guard hash the same text: a mismatch would build every child here.
+    dict(id=65, desc="sql: nothing changed; every guarded child skips on an equal compiled SQL hash", select=SQL,
+         vars=STEADY),
+    dict(id=66, desc="sql: a macro a guarded child renders changes; its checksum holds, its compiled SQL moves, "
+                     "it builds", select=SQL, vars=STEADY, files={SQL_MACRO: "changed"}),
+    # The macro variant is named again from here on, so each scenario states the file it expects.
+    dict(id=67, desc="sql: a var rendered into a guarded child's SQL changes; it builds", select=SQL, vars=SQL_67,
+         files={SQL_MACRO: "changed"}),
+    dict(id=68, desc="sql: a 0.0.1 ledger row with no compiled SQL hash as a child's latest build; it builds",
+         select=SQL, vars={**SQL_67, "fp_sql_legacy_child": "fp_sql_child"}, files={SQL_MACRO: "changed"}),
+    dict(id=69, desc="sql: every change is now behind a recorded hash; every guarded child skips again", select=SQL,
+         vars=SQL_67, files={SQL_MACRO: "changed"}),
 ]
 
 

@@ -100,3 +100,11 @@ models:
     description: SCD type 2 on its own source var (fp_knob_scd_source); moving it from appended to versioned adds a new version that closes an old row.
   - name: fp_knob_child_of_scd2
     description: Guarded child of fp_knob_scd2 that reads _valid_from and _valid_to, as an as-of join does; builds when a version closes.
+  - name: fp_sql_parent
+    description: Merge parent for the compiled-SQL group; unchanged after the group's initial. Its pre-hook plants a hashless 0.0.1 ledger row for the child fp_sql_legacy_child names.
+  - name: fp_sql_child
+    description: Guarded child of fp_sql_parent, the compiled-SQL group's control; nothing it renders moves.
+  - name: fp_sql_child_of_macro
+    description: Guarded child of fp_sql_parent that renders fp_sql_status_expr; the runner rewrites that macro, which moves its compiled SQL but not its checksum.
+  - name: fp_sql_child_of_var
+    description: Guarded child of fp_sql_parent that renders the fp_sql_label var into its SQL.
