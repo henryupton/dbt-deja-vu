@@ -1,0 +1,64 @@
+name: 'dbt_deja_vu_integration_tests'
+version: '1.0.0'
+config-version: 2
+
+require-dbt-version: [">=1.0.0"]
+
+profile: 'default'
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+  - "logs"
+
+flags:
+  send_anonymous_usage_stats: false
+
+seeds:
+  dbt_deja_vu_integration_tests:
+    +quote_columns: false
+    fingerprint:
+      +post-hook:
+        - "alter table {{ this }} set data_retention_time_in_days = 1"
+        - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+
+models:
+  dbt_deja_vu_integration_tests:
+    +materialized: table
+    fingerprint:
+      +post-hook:
+        - "alter table {{ this }} set data_retention_time_in_days = 1"
+        - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+    fingerprint_unprotected:
+      +post-hook:
+        - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+    fingerprint_norowts:
+      +post-hook:
+        - "alter table {{ this }} set data_retention_time_in_days = 1"
+        - "alter table {{ this }} set row_timestamp = false"
+        - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+
+tests:
+  dbt_deja_vu_integration_tests:
+    +store_failures: true
+
+vars:
+  # Column names for the dbt-scd2-utils scd fixtures.
+  dbt_scd2_utils:
+    update_all_previous_records: true
+    is_current_column: _is_current
+    valid_from_column: _valid_from
+    valid_to_column: _valid_to
+    updated_at_column: _updated_at
+    change_type_column: _change_type
+    created_at_column: _created_at
+  default_valid_to: "2999-12-31 23:59:59"
+
+on-run-start:
+  - "{{ dbt_deja_vu.fingerprint_register() }}"

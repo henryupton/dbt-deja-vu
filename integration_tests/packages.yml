@@ -1,0 +1,7 @@
+packages:
+  # Local path so the suite tests the working copy of the package.
+  - local: ../
+
+  # The scd fixtures are built with dbt-scd2-utils' scd materialization. dbt-deja-vu itself does not depend on it.
+  - git: "https://github.com/henryupton/dbt-scd2-utils.git"
+    revision: 1.0.55
