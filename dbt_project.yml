@@ -1,0 +1,12 @@
+name: 'dbt_deja_vu'
+version: '1.0.0'
+config-version: 2
+
+require-dbt-version: [">=1.0.0"]
+
+macro-paths: ["macros"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+  - "logs"
