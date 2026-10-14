@@ -16,9 +16,9 @@ loaded-at column, and a table kept at retention 0. Each parent has a child built
 
 - **`fp_ledger`** - view over this deploy's rows in the `fingerprint_deploy_node` ledger; the
   `matches_expected_seed` test compares it to `seeds/fingerprint/fp_expected_<n>.csv`, keyed by
-  the `fp_iteration` var. Enabled only with the `fingerprint` var on, as are the two singular tests
+  the `fp_iteration` var. Enabled only with the `fingerprint` var on, as are the three singular tests
   below: the ledger table exists only once a fingerprint run has created it, so a plain `dbt build`
-  on a fresh schema leaves all three out.
+  on a fresh schema leaves all four out.
 - **`fp_child_late`** - disabled unless `fp_enable_late_child` is set, so it can appear mid-sequence.
 
 The `fp_edp` group (scenarios 33 to 38) holds common warehouse shapes:
@@ -66,9 +66,10 @@ The `fp_edge` group (scenarios 39 to 57) holds the guard's remaining branches an
 - **`fp_edge_ntz`** and **`fp_edge_date`** - `timestamp_ntz` under a Pacific/Auckland session and `date`
   loaded-at columns: a row one hour above the watermark reads `appended`, a row on the watermark day `modified`.
 
-Two singular tests ride along with every group: `fp_one_pending_per_node` (registration stays idempotent
-across the steps and retries of one deploy) and `fp_skipped_left_alone` (no row of a skipped node's table
-was committed at or after the deploy's snapshot). Scenarios 52 and 53 fail a parent on purpose: the
+Three singular tests ride along with every group: `fp_one_pending_per_node` (registration stays idempotent
+across the steps and retries of one deploy), `fp_skipped_left_alone` (no row of a skipped node's table
+was committed at or after the deploy's snapshot) and `fp_register_batched` (no register statement wrote more
+than `fingerprint_register_batch_size` rows; one statement stamps all its rows with one `registered_at`). Scenarios 52 and 53 fail a parent on purpose: the
 children then build on its `pending` verdict, and a retry under the same deploy id settles it against the
 original snapshot. Scenarios 54 and 55 decide `fp_edge_child_multi` twice in one deploy:
 
@@ -104,6 +105,8 @@ deploy:
 - **61** - the same again with `fingerprint_skip: false` on the wall-clock child, which now builds.
 - **62** - a new version of an old key closes its old row. Under the default (`fingerprint_exclude_scd_columns`
   false) the dim reads `modified` and its guarded child builds.
+- **63** - `fingerprint_register_batch_size` 1, over two steps of one deploy: every register statement carries
+  one row, and the second step's batches for the first step's nodes insert nothing.
 
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
 `fp_source` picks a seed (a fixture may pass its own), `fp_upper_email` / `fp_null_email_customer` change values below the
@@ -117,7 +120,7 @@ dbt deps
 ```
 
 ```bash
-# Sixty-two ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Sixty-three ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

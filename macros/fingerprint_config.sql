@@ -28,6 +28,9 @@
                                                  nothing fingerprinted it.
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every
                                                  node carrying the tag is registered, default none.
+    fingerprint_register_batch_size (int):       rows per registration insert, default 200. Snowflake cannot retry
+                                                 a statement over 1 MB, which one insert reaches at about 500
+                                                 nodes; lower it for very wide tables, whose shape rides on the row.
 
   Per-model meta: fingerprint_loaded_at, fingerprint_exclude (added to the global list), fingerprint_skip (false
   keeps fingerprint_should_skip() from skipping the node; it is still fingerprinted for its children).

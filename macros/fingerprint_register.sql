@@ -15,6 +15,11 @@
   parents instead. Nor are nodes whose materialization is in fingerprint_exclude_materializations
   (types that never run hooks); a child of one never skips.
 
+  The insert goes in statements of at most fingerprint_register_batch_size rows (default 200):
+  Snowflake cannot retry a statement over 1 MB, and each row carries the node's column shape.
+  Every batch keeps the already-registered check, so a failure part way leaves the earlier
+  batches registered and a retry under the same deploy id registers the rest.
+
     on-run-start:
       - "{{ dbt_deja_vu.fingerprint_register() }}"
 
@@ -112,15 +117,22 @@
     ) -%}
   {%- endfor -%}
 
-  {%- do run_query(
-      "insert into " ~ node_rel
-      ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, pre_shape, checksum)"
-      ~ " with r as (" ~ (rows | join(' union all ')) ~ ")"
-      ~ " select r.deploy_id, r.node_id, r.node_name, r.relation_name, r.parents, r.snapshot_at, r.loaded_at_column, r.verdict, r.detail, r.registered_at, r.pre_shape, r.checksum"
-      ~ " from r where not exists (select 1 from " ~ node_rel ~ " n where n.deploy_id = r.deploy_id and n.node_id = r.node_id)"
-  ) -%}
-  {%- do log("fingerprint: registered " ~ (rows | length) ~ " node(s) for deploy " ~ deploy_id ~ " at " ~ snapshot_at
-      ~ " (command " ~ dbt_deja_vu.fingerprint_command() ~ ")", info=true) -%}
+  {%- set batch_size = [var('fingerprint_register_batch_size', 200) | int, 1] | max -%}
+  {%- set batches = [] -%}
+  {%- for start in range(0, rows | length, batch_size) -%}
+    {%- do batches.append(rows[start:start + batch_size]) -%}
+  {%- endfor -%}
+  {%- for batch in batches -%}
+    {%- do run_query(
+        "insert into " ~ node_rel
+        ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, pre_shape, checksum)"
+        ~ " with r as (" ~ (batch | join(' union all ')) ~ ")"
+        ~ " select r.deploy_id, r.node_id, r.node_name, r.relation_name, r.parents, r.snapshot_at, r.loaded_at_column, r.verdict, r.detail, r.registered_at, r.pre_shape, r.checksum"
+        ~ " from r where not exists (select 1 from " ~ node_rel ~ " n where n.deploy_id = r.deploy_id and n.node_id = r.node_id)"
+    ) -%}
+  {%- endfor -%}
+  {%- do log("fingerprint: registered " ~ (rows | length) ~ " node(s) in " ~ (batches | length) ~ " statement(s) for deploy "
+      ~ deploy_id ~ " at " ~ snapshot_at ~ " (command " ~ dbt_deja_vu.fingerprint_command() ~ ")", info=true) -%}
 
   {{ return('select 1 where false') }}
 {% endmacro %}

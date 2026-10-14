@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 62 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 63 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
 run in order; --only / --from re-run a slice against whatever state the tables are in. fp_ledger
-and the two singular tests are enabled only with the fingerprint var on, which the runner sets on
+and the three singular tests are enabled only with the fingerprint var on, which the runner sets on
 every step except scenario 50's first (built with the fingerprint off on purpose).
 
 The suite is weighted towards false negatives: every way a genuine change could be waved
@@ -31,7 +31,7 @@ compiles with the fingerprint on, which must register nothing. Scenario 60 exclu
 materialization, which is never registered and whose guarded child always builds. Scenario 61 opts a
 guarded child out of skipping with meta fingerprint_skip false. Scenario 62 closes an scd row, which
 reads modified under the default; scenarios 4 and 48 set fingerprint_exclude_scd_columns true to pin
-the opt-in.
+the opt-in. Scenario 63 registers one row per statement across two steps of one deploy.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -283,6 +283,12 @@ SCENARIOS = [
          select=KNOB, vars={**KNOB_VARS, "fp_knob_wallclock_skip": False}),
     dict(id=62, desc="knob: a new scd version closes an old row; under the default it reads modified and its guarded "
                      "child builds", select=KNOB, vars=KNOB_62),
+    # One row per register statement; B re-registers A's nodes in their own batches, which must insert nothing.
+    dict(id=63, desc="knob: registration in batches of one row; every node registers exactly once across two steps",
+         steps=[
+             dict(select="fp_knob_parent fp_knob_scd2", vars={**KNOB_62, "fingerprint_register_batch_size": 1}),
+             dict(select=KNOB, vars={**KNOB_62, "fingerprint_register_batch_size": 1}),
+         ]),
 ]
 
 
