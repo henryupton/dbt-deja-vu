@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 59 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 60 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -27,7 +27,8 @@ replaced a parent; the rebuild records new.
 Scenarios 56 and 57 replace a parent in a deploy that builds none of its guarded children; the next
 deploy builds them on that verdict, though the parent reads unchanged there.
 Scenarios 58 onwards are the package knobs. A step may name its command (default build): scenario 59
-compiles with the fingerprint on, which must register nothing.
+compiles with the fingerprint on, which must register nothing. Scenario 60 excludes a hookless
+materialization, which is never registered and whose guarded child always builds.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -124,7 +125,7 @@ EDGE_45 = {k: v for k, v in EDGE_44.items() if k != "fp_edge_null_extra"}
 SCD2_PAIR = "fp_edge_scd2 fp_edge_child_of_scd2 fp_ledger"
 
 # The package-knob group: the vars a project sets to fit the fingerprint to its own deploy.
-KNOB_VARS = {**STEADY}
+KNOB_VARS = {**STEADY, "fingerprint_exclude_materializations": ["hookless_table"]}
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -268,6 +269,8 @@ SCENARIOS = [
              dict(command="compile", select=KNOB, flags=["--write-catalog"], vars=KNOB_VARS),
              dict(select="fp_knob_parent fp_ledger", vars=KNOB_VARS),
          ]),
+    dict(id=60, desc="knob: a hookless table excluded by materialization is never registered; its guarded child builds "
+                     "though its other parent is unchanged", select=KNOB, vars=KNOB_VARS),
 ]
 
 

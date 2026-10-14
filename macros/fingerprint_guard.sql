@@ -9,7 +9,9 @@
   are looked through to their own parents. A node with no parents, none registered in this
   deploy, or no fingerprinted build of this relation on record is never skipped: the guard cannot
   tell why it is being built. Nor is a node whose own SQL changed, however its parents came out;
-  the parents say nothing about that.
+  the parents say nothing about that. Nor is a node, or a child of one, whose materialization is
+  in fingerprint_exclude_materializations: it carries no verdict, so whether it was rebuilt is
+  unknown.
 
   The checksum is the node's own source file, so a change that alters its output only through a
   macro it calls, a var, or YAML-only config leaves the checksum equal and the guard cannot see
@@ -41,11 +43,24 @@
     {{ return(false) }}
   {%- endif -%}
   {%- set node = node if node is not none else model -%}
+  {%- if dbt_deja_vu.fingerprint_materialization_excluded(node) -%}
+    {%- do log("fingerprint: " ~ node.name ~ " is excluded from the fingerprint by materialization; building", info=true) -%}
+    {{ return(false) }}
+  {%- endif -%}
   {%- set parents = [] -%}
+  {%- set unfingerprinted = [] -%}
   {%- for p in dbt_deja_vu.fingerprint_parent_ids(node) -%}
     {%- do parents.append(dbt_deja_vu.fingerprint_lit(p)) -%}
+    {%- if dbt_deja_vu.fingerprint_materialization_excluded(graph.nodes.get(p) if graph is defined else none) -%}
+      {%- do unfingerprinted.append(p) -%}
+    {%- endif -%}
   {%- endfor -%}
   {%- if parents | length == 0 -%}
+    {{ return(false) }}
+  {%- endif -%}
+  {# A parent excluded by materialization carries no verdict, so nothing says it did not move. #}
+  {%- if unfingerprinted | length > 0 -%}
+    {%- do log("fingerprint: " ~ node.name ~ " reads " ~ (unfingerprinted | join(', ')) ~ ", excluded from the fingerprint by materialization; building", info=true) -%}
     {{ return(false) }}
   {%- endif -%}
 

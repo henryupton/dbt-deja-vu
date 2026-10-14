@@ -51,6 +51,8 @@
 -- depends_on: {{ ref('fp_edge_date') }}
 -- depends_on: {{ ref('fp_knob_parent') }}
 -- depends_on: {{ ref('fp_knob_child') }}
+-- depends_on: {{ ref('fp_knob_hookless') }}
+-- depends_on: {{ ref('fp_knob_child_of_hookless') }}
 {% if var('fp_enable_late_child', false) %}
 -- depends_on: {{ ref('fp_child_late') }}
 {% endif %}

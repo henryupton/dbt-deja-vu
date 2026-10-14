@@ -12,7 +12,8 @@
   and not dbt's run_started_at. A node already registered for this deploy id (an earlier step of
   the same deploy) is left alone. Ephemeral models are not registered: they have no relation and
   run no hooks, so they could never leave `pending`; their descendants list the ephemeral's own
-  parents instead.
+  parents instead. Nor are nodes whose materialization is in fingerprint_exclude_materializations
+  (types that never run hooks); a child of one never skips.
 
     on-run-start:
       - "{{ dbt_deja_vu.fingerprint_register() }}"
@@ -51,7 +52,8 @@
   {%- set groups = {} -%}
   {%- for uid in selected -%}
     {%- set n = graph.nodes.get(uid) -%}
-    {%- if n is not none and n.resource_type in ['model', 'seed', 'snapshot'] and not dbt_deja_vu.fingerprint_is_ephemeral(n) -%}
+    {%- if n is not none and n.resource_type in ['model', 'seed', 'snapshot'] and not dbt_deja_vu.fingerprint_is_ephemeral(n)
+        and not dbt_deja_vu.fingerprint_materialization_excluded(n) -%}
       {%- set alias = n.alias if (n.alias is defined and n.alias) else n.name -%}
       {%- set group_key = (n.database ~ '.' ~ n.schema) | upper -%}
       {%- if group_key not in groups -%}

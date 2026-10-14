@@ -88,8 +88,13 @@ deploy:
 
 - **`fp_knob_parent`** and **`fp_knob_child`** - a merge parent that stays unchanged after the group's
   initial, and its guarded child, the control that skips.
+- **`fp_knob_hookless`** and **`fp_knob_child_of_hookless`** - a table built by the test-only `hookless_table`
+  materialization, which runs no hooks (the serving-layer shape), and a guarded child that also reads
+  `fp_knob_parent`. The group lists `hookless_table` in `fingerprint_exclude_materializations`, so the table is
+  never registered and its child always builds.
 - **59** - a `dbt compile --write-catalog` with the fingerprint on, under the build's deploy id, registers
   nothing (`fingerprint_commands`); the build step after it registers only what it selects.
+- **60** - nothing changed: the control skips, and the child of the hookless table builds on that parent alone.
 
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
 `fp_source` picks a seed, `fp_upper_email` / `fp_null_email_customer` change values below the
@@ -103,7 +108,7 @@ dbt deps
 ```
 
 ```bash
-# Fifty-nine ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Sixty ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

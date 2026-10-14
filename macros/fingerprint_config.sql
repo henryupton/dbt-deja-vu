@@ -19,6 +19,11 @@
                                                  an old row then reads appended rather than modified. The cost is that a logic change
                                                  which only moves validity reads unchanged; set false where scd2_join
                                                  consumers depend on those columns.
+    fingerprint_exclude_materializations (list): materializations never fingerprinted, default []. Their nodes
+                                                 are not registered and their post-hook is a no-op, so a type that
+                                                 never runs hooks (streamlit, semantic_view, agent, ...) no longer
+                                                 sits pending. A child of one never skips: it was rebuilt and
+                                                 nothing fingerprinted it.
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every
                                                  node carrying the tag is registered, default none.
 
@@ -137,6 +142,21 @@
 {% macro fingerprint_relation_name(node) %}
   {%- set alias = node.alias if (node.alias is defined and node.alias) else node.name -%}
   {{ return(node.database ~ '.' ~ node.schema ~ '.' ~ alias) }}
+{% endmacro %}
+
+{#
+  True when the node's materialization is in the fingerprint_exclude_materializations var. Such a node is never
+  registered and its post-hook is a no-op: types that never run hooks (streamlit, semantic_view, ...) would
+  otherwise sit pending for good.
+#}
+{% macro fingerprint_materialization_excluded(node) %}
+  {%- set excluded = var('fingerprint_exclude_materializations', []) or [] -%}
+  {%- if excluded is string -%}{%- set excluded = [excluded] -%}{%- endif -%}
+  {%- if excluded | length == 0 or node is none or node.config is not defined or node.config is none
+      or node.config.materialized is not defined -%}
+    {{ return(false) }}
+  {%- endif -%}
+  {{ return((node.config.materialized | string | lower) in (excluded | map('string') | map('lower') | list)) }}
 {% endmacro %}
 
 {% macro fingerprint_is_ephemeral(node) %}

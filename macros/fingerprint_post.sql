@@ -9,7 +9,8 @@
       +post-hook: "{{ dbt_deja_vu.fingerprint_post(this) }}"
 
   Every resource type fingerprint_register() enrols needs it: a node whose post-hook never runs
-  stays `pending` and blocks every child.
+  stays `pending` and blocks every child. A materialization listed in
+  fingerprint_exclude_materializations is never enrolled, and this hook is a no-op on it.
 
   Compares the table as it stands now with the table as it stood at `snapshot_at`, read through
   Time Travel, and appends one of these to the ledger:
@@ -52,7 +53,7 @@
 #}
 
 {% macro fingerprint_post(relation) %}
-  {%- if not execute or not dbt_deja_vu.fingerprint_enabled() -%}
+  {%- if not execute or not dbt_deja_vu.fingerprint_enabled() or dbt_deja_vu.fingerprint_materialization_excluded(model) -%}
     {{ return('select 1 where false') }}
   {%- endif -%}
 
