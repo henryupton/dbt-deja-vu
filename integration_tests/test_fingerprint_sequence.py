@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 57 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 59 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -26,6 +26,8 @@ Scenario 55 skips a guarded child in one step and rebuilds it in the next, once 
 replaced a parent; the rebuild records new.
 Scenarios 56 and 57 replace a parent in a deploy that builds none of its guarded children; the next
 deploy builds them on that verdict, though the parent reads unchanged there.
+Scenarios 58 onwards are the package knobs. A step may name its command (default build): scenario 59
+compiles with the fingerprint on, which must register nothing.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -48,6 +50,7 @@ EVOLVE = "tag:fp_evolve"
 GUARD = "tag:fp_guard"
 EDP = "tag:fp_edp"
 EDGE = "tag:fp_edge"
+KNOB = "tag:fp_knob"
 
 # Files the runner rewrites mid-sequence: seeds so a reload carries changed content, one guarded model so
 # its checksum moves while its parents stay put. A variant stays in place for the scenarios that follow;
@@ -119,6 +122,9 @@ EDGE_43 = {**EDGE_42, "fp_edge_null_extra": "ACTIVE", "fp_edge_date_extra": ["20
 EDGE_44 = {**EDGE_43, "fp_edge_null_extra": "INACTIVE"}
 EDGE_45 = {k: v for k, v in EDGE_44.items() if k != "fp_edge_null_extra"}
 SCD2_PAIR = "fp_edge_scd2 fp_edge_child_of_scd2 fp_ledger"
+
+# The package-knob group: the vars a project sets to fit the fingerprint to its own deploy.
+KNOB_VARS = {**STEADY}
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -253,6 +259,15 @@ SCENARIOS = [
          select="fp_edge_parent_a fp_ledger", flags=["--full-refresh"], vars=EDGE_45),
     dict(id=57, desc="the next deploy builds the children that replace never reached, though the parent reads unchanged",
          select=EDGE, vars=EDGE_45),
+    # --- package knobs: the command gate and the vars after it --------------------------------------------
+    dict(id=58, desc="knob: initial, create or replace everywhere", select=KNOB, flags=["--full-refresh"],
+         vars={**KNOB_VARS, "fp_full_refresh_strategy": "replace"}),
+    # The compile fires on-run-start under the build's deploy id; anything it registered would sit pending here.
+    dict(id=59, desc="knob: a compile with the fingerprint on registers nothing; the next step registers only its own",
+         steps=[
+             dict(command="compile", select=KNOB, flags=["--write-catalog"], vars=KNOB_VARS),
+             dict(select="fp_knob_parent fp_ledger", vars=KNOB_VARS),
+         ]),
 ]
 
 
@@ -342,8 +357,8 @@ def main() -> int:
                 **step.get("vars", {}),
             }
             last_vars = step_vars
-            cmd = [args.dbt, "build", "--select", *step["select"].split(), "--vars", json.dumps(step_vars),
-                   *step.get("flags", []), *common]
+            cmd = [args.dbt, step.get("command", "build"), "--select", *step["select"].split(),
+                   "--vars", json.dumps(step_vars), *step.get("flags", []), *common]
             failed = run(cmd).returncode != 0
             if failed != bool(step.get("expect_fail")):
                 print(f"[fingerprint] step {'succeeded but was expected to fail' if not failed else 'failed'}", flush=True)

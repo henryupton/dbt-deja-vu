@@ -2,7 +2,7 @@
     config(
         materialized='view',
         enabled=(var('fingerprint', false) | string | lower) in ['true', '1'],
-        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge']
+        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge', 'fp_knob']
     )
 }}
 
@@ -49,6 +49,8 @@
 -- depends_on: {{ ref('fp_edge_nulls') }}
 -- depends_on: {{ ref('fp_edge_ntz') }}
 -- depends_on: {{ ref('fp_edge_date') }}
+-- depends_on: {{ ref('fp_knob_parent') }}
+-- depends_on: {{ ref('fp_knob_child') }}
 {% if var('fp_enable_late_child', false) %}
 -- depends_on: {{ ref('fp_child_late') }}
 {% endif %}

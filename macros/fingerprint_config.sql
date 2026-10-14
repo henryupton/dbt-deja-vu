@@ -4,6 +4,10 @@
   Vars (all top-level, so they can be set in dbt_project.yml or with --vars):
     fingerprint (bool):                          master switch, default false.
     fingerprint_skip_unchanged_upstream (bool):  lets fingerprint_should_skip() answer true, default false.
+    fingerprint_commands (list):                 the commands that register, compared with flags.WHICH, default
+                                                 [build, run, seed, snapshot, retry]. Any other command (compile,
+                                                 docs generate, show, test, ls, parse, run-operation) registers
+                                                 nothing.
     deploy_id (string):                          groups one deploy's ledger rows, default invocation_id.
     fingerprint_schema (string):                 ledger schema, default target.schema.
     fingerprint_loaded_at_column (string):       row arrival column, default _loaded_at.
@@ -38,6 +42,27 @@
 
 {% macro fingerprint_skip_enabled() %}
   {{ return(dbt_deja_vu.fingerprint_flag('fingerprint_skip_unchanged_upstream')) }}
+{% endmacro %}
+
+{# The dbt command this invocation runs (flags.WHICH, e.g. 'build' or 'compile'), lower-cased; none when the engine does not expose it. #}
+{% macro fingerprint_command() %}
+  {%- set which = flags.WHICH if (flags is defined and flags.WHICH is defined) else none -%}
+  {{ return((which | string | lower) if which is not none else none) }}
+{% endmacro %}
+
+{#
+  True when the command builds, i.e. flags.WHICH is in the fingerprint_commands var. compile, docs generate, show
+  and test run on-run-start too, and a registration there would sit pending and block every child. An engine that
+  does not expose the command counts as building: leaving a real build out of the ledger is the unsafe direction.
+#}
+{% macro fingerprint_building_command() %}
+  {%- set which = dbt_deja_vu.fingerprint_command() -%}
+  {%- if which is none -%}
+    {{ return(true) }}
+  {%- endif -%}
+  {%- set commands = var('fingerprint_commands', ['build', 'run', 'seed', 'snapshot', 'retry']) -%}
+  {%- if commands is string -%}{%- set commands = [commands] -%}{%- endif -%}
+  {{ return(which in (commands | map('string') | map('lower') | list)) }}
 {% endmacro %}
 
 {% macro fingerprint_deploy_id() %}

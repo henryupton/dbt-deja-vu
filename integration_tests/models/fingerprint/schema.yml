@@ -86,3 +86,7 @@ models:
     description: Insert-overwrite table with a timestamp_ntz _loaded_at built under a Pacific/Auckland session; fp_edge_ntz_extra appends a row one hour above the watermark.
   - name: fp_edge_date
     description: Insert-overwrite table with a date _loaded_at; fp_edge_date_extra adds rows on the watermark day (modified) or a later day (appended).
+  - name: fp_knob_parent
+    description: Merge parent for the package-knob group (fingerprint_commands and the vars after it); unchanged after the group's initial.
+  - name: fp_knob_child
+    description: Guarded child of fp_knob_parent, the knob group's control; skips whenever its parent is unchanged.

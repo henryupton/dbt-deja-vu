@@ -83,6 +83,14 @@ Scenarios 56 and 57 replace `fp_edge_parent_a` in a deploy that selects none of 
 run the whole group: the parent reads `unchanged` there, and its children still build on the other
 deploy's `new`, which arrived after their last build.
 
+The `fp_knob` group (scenarios 58 onwards) holds the vars a project sets to fit the fingerprint to its own
+deploy:
+
+- **`fp_knob_parent`** and **`fp_knob_child`** - a merge parent that stays unchanged after the group's
+  initial, and its guarded child, the control that skips.
+- **59** - a `dbt compile --write-catalog` with the fingerprint on, under the build's deploy id, registers
+  nothing (`fingerprint_commands`); the build step after it registers only what it selects.
+
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
 `fp_source` picks a seed, `fp_upper_email` / `fp_null_email_customer` change values below the
 watermark, `fp_extra_column` / `fp_drop_column` change the shape, `fp_duplicate_rows`,
@@ -95,8 +103,8 @@ dbt deps
 ```
 
 ```bash
-# Fifty-seven ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
-# scenario 50's first step, built with it off on purpose) and
+# Fifty-nine ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must
 # not be waved through, and guarded children that must build.

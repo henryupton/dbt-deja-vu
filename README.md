@@ -41,7 +41,7 @@ dbt build --vars '{"fingerprint": true, "deploy_id": "deploy-123"}'
 
 Every resource type the register enrols needs the post-hook: an enrolled node whose post-hook never runs stays `pending` and blocks every child.
 
-`fingerprint_register()` appends one `pending` row per selected model, seed and snapshot (ephemeral models excepted) to a ledger table (`fingerprint_deploy_node`), stamped with Snowflake's clock as `snapshot_at`, the node's parents, its column shape and its source checksum. `fingerprint_post(this)` then compares the table as built with the table `at(timestamp => snapshot_at)` and appends a verdict row. The ledger is append-only, so threads finishing together never queue on a table lock. Per node and deploy the latest real verdict counts; a `skipped` row stands only when the node recorded no verdict in that deploy, and `pending` only when nothing else exists. A verdict is measured against the deploy's snapshot, so it is cumulative over every step and retry of the deploy, and a later skip wrote nothing.
+`fingerprint_register()` appends, under a building command (see `fingerprint_commands`), one `pending` row per selected model, seed and snapshot (ephemeral models excepted) to a ledger table (`fingerprint_deploy_node`), stamped with Snowflake's clock as `snapshot_at`, the node's parents, its column shape and its source checksum. `fingerprint_post(this)` then compares the table as built with the table `at(timestamp => snapshot_at)` and appends a verdict row. The ledger is append-only, so threads finishing together never queue on a table lock. Per node and deploy the latest real verdict counts; a `skipped` row stands only when the node recorded no verdict in that deploy, and `pending` only when nothing else exists. A verdict is measured against the deploy's snapshot, so it is cumulative over every step and retry of the deploy, and a later skip wrote nothing.
 
 | Verdict | Meaning | Blocks a child's skip |
 |---------|---------|-----------------------|
@@ -79,6 +79,7 @@ Two blind spots. The checksum is the node's own source file, so a change that al
 |-----|---------|---------|
 | `fingerprint` | `false` | Master switch; every macro is a no-op without it |
 | `fingerprint_skip_unchanged_upstream` | `false` | Lets `fingerprint_should_skip()` return true |
+| `fingerprint_commands` | `build`, `run`, `seed`, `snapshot`, `retry` | The commands that register, compared with `flags.WHICH`. `compile`, `docs generate`, `test` and (on Fusion) `show` fire `on-run-start` too, and a registration there would sit `pending` and block every child, so any command not listed registers nothing. A building command left off the list is as invisible to the guard as a run with the fingerprint off. An engine that does not expose `flags.WHICH` registers anyway |
 | `deploy_id` | `invocation_id` | Shared by the steps of one deploy; registration is idempotent per deploy id |
 | `fingerprint_schema` | `target.schema` | Schema holding the two ledger tables; point it at a dedicated schema so model-schema housekeeping (orphan drops, schema rebuilds) never sees the ledger |
 | `fingerprint_loaded_at_column` | `_loaded_at` | Watermark and month-bucket column; per model via `meta.fingerprint_loaded_at` |

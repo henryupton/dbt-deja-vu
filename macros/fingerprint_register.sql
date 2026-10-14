@@ -1,6 +1,10 @@
 {#
   Content fingerprint: on-run-start registration.
 
+  Registers only under a building command (flags.WHICH in the fingerprint_commands var):
+  compile, docs generate, show and test fire on-run-start too, and a registration there would
+  sit pending for good and block every child.
+
   Creates the ledger if missing, then appends one `pending` row per selected model, seed or
   snapshot with the deploy id, its parents, its current column shape, its source checksum and
   `snapshot_at`, Snowflake's clock at run start. The post-hook (fingerprint_post) reads the
@@ -18,6 +22,10 @@
 
 {% macro fingerprint_register() %}
   {%- if not execute or not dbt_deja_vu.fingerprint_enabled() -%}
+    {{ return('select 1 where false') }}
+  {%- endif -%}
+  {%- if not dbt_deja_vu.fingerprint_building_command() -%}
+    {%- do log("fingerprint: " ~ dbt_deja_vu.fingerprint_command() ~ " is not in fingerprint_commands; nothing registered", info=true) -%}
     {{ return('select 1 where false') }}
   {%- endif -%}
 
@@ -109,7 +117,8 @@
       ~ " select r.deploy_id, r.node_id, r.node_name, r.relation_name, r.parents, r.snapshot_at, r.loaded_at_column, r.verdict, r.detail, r.registered_at, r.pre_shape, r.checksum"
       ~ " from r where not exists (select 1 from " ~ node_rel ~ " n where n.deploy_id = r.deploy_id and n.node_id = r.node_id)"
   ) -%}
-  {%- do log("fingerprint: registered " ~ (rows | length) ~ " node(s) for deploy " ~ deploy_id ~ " at " ~ snapshot_at, info=true) -%}
+  {%- do log("fingerprint: registered " ~ (rows | length) ~ " node(s) for deploy " ~ deploy_id ~ " at " ~ snapshot_at
+      ~ " (command " ~ dbt_deja_vu.fingerprint_command() ~ ")", info=true) -%}
 
   {{ return('select 1 where false') }}
 {% endmacro %}
