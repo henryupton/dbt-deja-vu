@@ -1,6 +1,6 @@
 {#
-  Test-only materialization: the insert-overwrite shape the project's truncate_insert
-  uses for facts and marts. create or replace on the first build or --full-refresh, otherwise
+  Test-only materialization: the insert-overwrite shape common to truncate-and-reload
+  facts and marts. create or replace on the first build or --full-refresh, otherwise
   `insert overwrite into` the existing table by column name (quoted as stored, so mixed-case names
   survive) so the object, and its Time Travel, survive. Pre and post hooks run either way.
 #}

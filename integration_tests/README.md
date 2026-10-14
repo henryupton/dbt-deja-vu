@@ -9,8 +9,8 @@ schema, and asserts the verdict every fixture records.
 
 Fixtures for the content fingerprint macros (`macros/` in the package). Every
 materialization shape the fingerprint has to read is here: dbt-scd2-utils' `scd` types 1 and 2 (a test-only dependency), dbt
-`incremental` merge and append, dbt `table`, a test-only `overwrite_table` (insert overwrite, the
-project's truncate_insert shape), merges with `on_schema_change` set, a view, a table without a
+`incremental` merge and append, dbt `table`, a test-only `overwrite_table` (insert overwrite into the
+existing table), merges with `on_schema_change` set, a view, a table without a
 loaded-at column, and a table kept at retention 0. Each parent has a child built by the test-only
 `guarded_table` materialization, which asks `fingerprint_should_skip()` first.
 
@@ -21,7 +21,7 @@ loaded-at column, and a table kept at retention 0. Each parent has a child built
   on a fresh schema leaves all three out.
 - **`fp_child_late`** - disabled unless `fp_enable_late_child` is set, so it can appear mid-sequence.
 
-The `fp_edp` group (scenarios 33 to 38) holds the project's own shapes:
+The `fp_edp` group (scenarios 33 to 38) holds common warehouse shapes:
 
 - **`fp_dim_versioned`** - a versioned `scd` dim built as `fp_dim_versioned_v1`; `fp_child_of_versioned`
   refs the bare name, so its `depends_on` carries the versioned unique_id and the latest-version pointer
@@ -29,7 +29,7 @@ The `fp_edp` group (scenarios 33 to 38) holds the project's own shapes:
 - **`fp_stg_batch`** - a staging merge whose `_loaded_at` is a batch stamp, steered by `fp_batch_stage`:
   empty at snapshot, then two batches, then a late chunk of the current batch landing exactly at the
   watermark (must read `modified`), then a new batch.
-- **`fp_registry`** - a registry seed with no loaded-at column, the shape of the real ones. It reads
+- **`fp_registry`** - a registry seed with no loaded-at column. It reads
   `unhashable` whether or not its content changed, so `fp_child_of_registry` always builds. Scenario 37
   pins that.
 - **`fp_seed_live`** - a seed with `_loaded_at` whose CSV the runner rewrites in scenario 37 so a reload
@@ -109,5 +109,5 @@ dbt deps
 ```
 
 Fixture tables and the seeds under `seeds/fingerprint` get `data_retention_time_in_days = 1` from a
-post-hook, because the fingerprint reads the pre-build table through Time Travel and dev databases here
+post-hook, because the fingerprint reads the pre-build table through Time Travel and a dev database may
 have retention 0.

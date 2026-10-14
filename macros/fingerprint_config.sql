@@ -8,10 +8,11 @@
     fingerprint_schema (string):                 ledger schema, default target.schema.
     fingerprint_loaded_at_column (string):       row arrival column, default _loaded_at.
     fingerprint_exclude (list):                  columns never hashed, default [_batched_at, _written_at, _synthesised_at].
-    fingerprint_exclude_scd_columns (bool):      also leave out the scd validity columns (dbt-scd2-utils'
-                                                 is_current_column and valid_to_column, resolved per model as its
-                                                 scd materialization resolves them), default true. A new version closing an old row then
-                                                 reads appended rather than modified. The cost is that a logic change
+    fingerprint_exclude_scd_columns (bool):      also leave out the scd validity columns on every model, default
+                                                 true. Names come from dbt-scd2-utils' is_current_column and
+                                                 valid_to_column (model config, then the dbt_scd2_utils var),
+                                                 defaulting to _is_current and _valid_to. A new version closing
+                                                 an old row then reads appended rather than modified. The cost is that a logic change
                                                  which only moves validity reads unchanged; set false where scd2_join
                                                  consumers depend on those columns.
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every

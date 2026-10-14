@@ -30,7 +30,7 @@ seeds:
     description: Deleted without customer 4 as well, a July row removed at source.
     config: *fp_raw_config
   - name: fp_registry
-    description: A registry seed in the shape of the real ones, with no loaded-at column. Reads unhashable whether or not its content changed; the runner rewrites a label in scenario 37.
+    description: A registry-style seed (hand-maintained lookup) with no loaded-at column. Reads unhashable whether or not its content changed; the runner rewrites a label in scenario 37.
     config:
       tags: [fp_edp]
       column_types:

@@ -5,8 +5,9 @@ stop at the first table whose content came out identical: the hooks record wheth
 and a guard lets a materialization skip a child whose parents all came out unchanged. Build systems call this early
 cutoff.
 
-Everything is a no-op until `fingerprint: true` is set, and nothing skips until `fingerprint_skip_unchanged_upstream`
-is on as well.
+Everything is a no-op until `fingerprint: true` is set. Skipping needs two more things:
+`fingerprint_skip_unchanged_upstream` on, and a materialization that calls `fingerprint_should_skip()` before it
+builds. The package ships no materialization, so wrapping or overriding yours is up to you (see the guard below).
 
 ## Installation
 
@@ -45,14 +46,14 @@ Every resource type the register enrols needs the post-hook: an enrolled node wh
 | Verdict | Meaning | Blocks a child's skip |
 |---------|---------|-----------------------|
 | `new` | Object created or replaced after the snapshot, or a view | yes |
-| `unchanged` | Nothing written and the row count is equal, or every hashed month is equal | no |
-| `appended` | Every row the build wrote sits above the pre-build watermark (`max(_loaded_at)`) | no |
-| `modified` | A column was added, removed or retyped, or a month at or below the watermark counts or hashes differently | yes |
+| `unchanged` | Nothing written and the row count is equal, or the rewritten months hash equal and nothing sits above the watermark | no |
+| `appended` | Rows sit above the pre-build watermark (`max(_loaded_at)`) and nothing at or below it changed: nothing was written there, or the rewritten months hash equal | no |
+| `modified` | A column was added, removed or retyped (a retype only when the shape was registered at run start), a month at or below the watermark counts or hashes differently, or rows other than pure appends were written to a table with no watermark at the snapshot | yes |
 | `unhashable` | No loaded-at column on one side, a loaded-at column that is not a timestamp or date, or a table without row timestamps (`ROW_TIMESTAMP` off, which includes Iceberg) | yes |
 | `error` | Relation missing, no Time Travel (retention 0), or a snapshot older than the table's Time Travel retention | yes |
 | `skipped` | The guard skipped the build | no |
 
-The comparison is cheap until it has to hash. Object state comes from `show tables like`, shape from `show columns`, and the counts are filtered scalar subqueries on `METADATA$ROW_LAST_COMMIT_TIME` and the watermark, which prune to the partitions the build wrote. Only then are the touched `_loaded_at` months hashed with `hash_agg` on both sides (every month when every row was rewritten), and per-month row counts catch a deletion in a month the build never touched. Rows with a null loaded-at value form their own bucket and count as old rows, so they cannot pass as appended. The watermark is compared in the column's own type, so `timestamp_ntz` columns are safe under any session timezone. `GEOGRAPHY` and `GEOMETRY` columns cannot be hashed and are left out; the verdict `detail` names them. Per-month detail lands in `fingerprint_deploy_segment`.
+The comparison is cheap until it has to hash. Object state comes from `show tables like`, shape from `show columns`, and the counts are filtered scalar subqueries on `METADATA$ROW_LAST_COMMIT_TIME` and the watermark, which prune to the partitions the build wrote. Only then are the touched `_loaded_at` months hashed with `hash_agg` on both sides (every month when every row was rewritten), and per-month row counts catch a deletion in a month the build never touched. Rows with a null loaded-at value form their own bucket and count as old rows, so they cannot pass as appended. The watermark is compared in the column's own type, so `timestamp_ntz` columns are safe under any session timezone. `GEOGRAPHY` and `GEOMETRY` columns cannot be hashed and are left out; an `unchanged` or `appended` verdict names them in its `detail`. Per-month detail lands in `fingerprint_deploy_segment`.
 
 `fingerprint_should_skip()` is for a materialization to call before building. It returns true only when all of these hold:
 
@@ -66,7 +67,8 @@ Two blind spots. The checksum is the node's own source file, so a change that al
 `fingerprint_mark_skipped()` records the skip so the node's own children can read it. `integration_tests/macros/guarded_table.sql` shows the shape:
 
 ```jinja
-{% if existing_relation is not none and dbt_deja_vu.fingerprint_should_skip() %}
+{% set existing_relation = load_relation(this) %}
+{% if existing_relation is not none and existing_relation.is_table and dbt_deja_vu.fingerprint_should_skip() %}
   {% do dbt_deja_vu.fingerprint_mark_skipped(detail='no blocking parent verdict') %}
   {% call statement('main') %}select 'skipped' as outcome{% endcall %}
   {{ return({'relations': [existing_relation]}) }}
@@ -81,10 +83,10 @@ Two blind spots. The checksum is the node's own source file, so a change that al
 | `fingerprint_schema` | `target.schema` | Schema holding the two ledger tables; point it at a dedicated schema so model-schema housekeeping (orphan drops, schema rebuilds) never sees the ledger |
 | `fingerprint_loaded_at_column` | `_loaded_at` | Watermark and month-bucket column; per model via `meta.fingerprint_loaded_at` |
 | `fingerprint_exclude` | `_batched_at`, `_written_at`, `_synthesised_at` | Columns left out of the hash; per model via `meta.fingerprint_exclude` |
-| `fingerprint_exclude_scd_columns` | `true` | Also leaves `is_current_column` and `valid_to_column` (dbt-scd2-utils' names, resolved per model as its `scd` materialization resolves them) out of the hash, so a new version closing an old row reads `appended` rather than `modified`. The cost: a logic change that only moves validity (a `valid_to` fix, a `default_valid_to` change) reads `unchanged` and `scd2_join` consumers skip. Set `false` where that matters |
+| `fingerprint_exclude_scd_columns` | `true` | Also leaves the scd validity columns out of every model's hash: `_is_current` and `_valid_to`, or the names dbt-scd2-utils resolves for the model when its `dbt_scd2_utils` var or the model's config sets them. A new version closing an old row then reads `appended` rather than `modified`. The cost: a change that only moves validity (a `valid_to` fix, a `default_valid_to` change) reads `unchanged`, so children that read those columns can skip. Set `false` where that matters |
 | `fingerprint_select_tag` | none | Fallback selection for runtimes without `selected_resources` |
 
-Requirements: Snowflake with Time Travel on the fingerprinted tables (transient tables cap at one day, which is enough for a deploy) and row timestamps (`ROW_TIMESTAMP_DEFAULT` on the account or schema, or per-table `ROW_TIMESTAMP`); a table without them reads `unhashable` rather than failing. A build has to keep the object for the snapshot to survive: truncate + insert, `insert overwrite`, `merge` and `insert` all do; `create or replace` reads `new`, which is the right verdict for a first build or a column-set change. The hooks run inside the node, so a SQL error they do not anticipate fails that node's build; the known cases (missing relation, no Time Travel, a snapshot older than the table's Time Travel retention, no row timestamps, unsupported column types) are recorded as verdicts instead.
+Requirements: dbt Fusion, or dbt-core 1.10 or later (for `config.meta_get`); only Fusion has run the integration suite. Snowflake with Time Travel on the fingerprinted tables (transient tables cap at one day, which is enough for a deploy) and row timestamps (`ROW_TIMESTAMP_DEFAULT` on the account or schema, or per-table `ROW_TIMESTAMP`); a table without them reads `unhashable` rather than failing. A build has to keep the object for the snapshot to survive: truncate + insert, `insert overwrite`, `merge` and `insert` all do; `create or replace` reads `new`, which is the right verdict for a first build or a column-set change. The hooks run inside the node, so a SQL error they do not anticipate fails that node's build; the known cases (missing relation, no Time Travel, a snapshot older than the table's Time Travel retention, no row timestamps, unsupported column types) are recorded as verdicts instead.
 
 ## Integration tests
 

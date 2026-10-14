@@ -15,10 +15,13 @@
   Time Travel, and appends one of these to the ledger:
 
     new         object created or replaced after the snapshot (create or replace, first build), or a view
-    unchanged   nothing written and the row count is unchanged, or every hashed bucket matches
-    appended    every row this build wrote sits above the pre-build watermark (max loaded_at)
-    modified    a column was added, removed or retyped, or at least one month at or below the
-                watermark hashes or counts differently
+    unchanged   nothing written and the row count is equal, or the rewritten months hash equal and
+                nothing sits above the watermark
+    appended    rows sit above the pre-build watermark (max loaded_at) and nothing at or below it
+                changed: nothing was written there, or the rewritten months hash equal
+    modified    a column was added, removed or retyped (a retype only when the shape was registered
+                at run start), a month at or below the watermark counts or hashes differently, or
+                rows other than pure appends were written to a table with no watermark at the snapshot
     unhashable  no loaded_at column on one side, a loaded_at column that is not a timestamp or date,
                 or no row timestamps on the table (ROW_TIMESTAMP off, which includes Iceberg)
     error       relation missing, no Time Travel (retention 0), or a snapshot older than the
@@ -35,8 +38,8 @@
 
   The watermark is read and re-literalised in the loaded_at column's own type, so a timestamp_ntz
   column is never compared with a timestamp_tz literal (which shifts by the session offset).
-  Columns are quoted as stored. GEOGRAPHY and GEOMETRY cannot be hashed and are left out; the
-  detail names them.
+  Columns are quoted as stored. GEOGRAPHY and GEOMETRY cannot be hashed and are left out; an
+  unchanged or appended verdict names them in its detail.
 
   Cost shape, measured on production tables: object state and shape come from SHOW (metadata,
   about 0.1 s each); the counts are filtered scalar subqueries, which prune on the commit-time

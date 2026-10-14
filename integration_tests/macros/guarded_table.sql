@@ -1,8 +1,7 @@
 {#
   Test-only materialization: a plain table build that asks the fingerprint guard
-  first. When every registered parent finished unchanged or appended it leaves the existing
-  table alone and records `skipped`; otherwise it builds with create or replace. Exists to
-  exercise fingerprint_should_skip without touching the package materializations.
+  first. When fingerprint_should_skip() returns true it leaves the existing table alone and
+  records `skipped`; otherwise it builds with create or replace.
 #}
 
 {% materialization guarded_table, default %}

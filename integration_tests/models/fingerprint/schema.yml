@@ -14,7 +14,7 @@ models:
   - name: fp_child_guarded
     description: Child of fp_dim_scd2 built by the test-only guarded_table materialization, which skips when the parent verdict allows.
   - name: fp_fct_overwrite
-    description: Test-only insert-overwrite fact, the shape the project's truncate_insert uses.
+    description: Test-only insert-overwrite fact, the truncate-and-reload shape.
   - name: fp_child_of_overwrite
     description: Guarded child of fp_fct_overwrite.
   - name: fp_evt_evolve

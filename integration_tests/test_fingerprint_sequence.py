@@ -13,7 +13,7 @@ The suite is weighted towards false negatives: every way a genuine change could 
 through as unchanged or appended, and every way a guarded child could be skipped when it must
 build. Scenario 12 deletes fixture rows inside the build with a pre-hook (fp_delete_customer);
 a change made before the build's snapshot belongs to no deploy and is correctly invisible.
-Scenarios 33 to 38 are the project's own shapes: a versioned dim, a batch-stamped staging merge
+Scenarios 33 to 38 are common warehouse shapes: a versioned dim, a batch-stamped staging merge
 that starts empty, a registry seed with no loaded-at column, and a seed whose CSV the runner
 rewrites mid-sequence (FILE_VARIANTS); the originals are restored when the runner exits, and a
 variant a killed run left behind is replaced by the committed copy from git.
@@ -183,7 +183,7 @@ SCENARIOS = [
     # --- seed replaced -------------------------------------------------------------------------------
     dict(id=32, desc="guard: seed selected with --full-refresh, create or replace (child builds)",
          select=f"{GUARD} fp_raw_deleted_b", flags=["--full-refresh"], vars=STEADY),
-    # --- the project's own shapes: versioned dim, batch-stamped staging merge, registry seed, seed change ---
+    # --- common warehouse shapes: versioned dim, batch-stamped staging merge, registry seed, seed change ---
     # The scd dim is replaced on the initial so a rerun over an existing table reads new, not modified.
     dict(id=33, desc="edp: initial (versioned dim, empty batch stage, registry and live seeds)", select=EDP,
          flags=["--full-refresh"], vars={**STEADY, "fp_batch_stage": 0, "fp_full_refresh_strategy": "replace"}),

@@ -95,7 +95,8 @@ jobs:
           
           # Add and commit changes
           git add README.md
-          git commit -m "Update README revision to $NEW_VERSION"
+          # The README can already carry this version (the first release); tag regardless.
+          git diff --cached --quiet || git commit -m "Update README revision to $NEW_VERSION"
           
           # Create and push the new tag
           git tag "$NEW_VERSION"

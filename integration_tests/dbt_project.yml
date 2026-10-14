@@ -49,7 +49,7 @@ tests:
     +store_failures: true
 
 vars:
-  # Column names for the dbt-scd2-utils scd fixtures.
+  # dbt-scd2-utils settings for the scd fixtures; fingerprint_scd_column also reads the column names here.
   dbt_scd2_utils:
     update_all_previous_records: true
     is_current_column: _is_current
