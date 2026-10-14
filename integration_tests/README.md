@@ -54,8 +54,8 @@ The `fp_edge` group (scenarios 39 to 57) holds the guard's remaining branches an
 - **`fp_edge_adopted`** - a table first built with the fingerprint off, under an alias fresh per run: no
   baseline for the relation, so it builds once, then skips.
 - **`fp_edge_scd2`** - the validity blind spot pinned: a full refresh with a different `default_valid_to` reads
-  `unchanged` with the scd columns excluded (the default) and `modified` with `fingerprint_exclude_scd_columns`
-  false.
+  `unchanged` with `fingerprint_exclude_scd_columns` set true (scenario 48) and `modified` with it false.
+  Scenario 4 sets it true too, so a later version of an old key reads `appended` on `fp_dim_scd2`.
 - **`fp_edge_norowts`** (its folder switches `ROW_TIMESTAMP` off before the fingerprint runs) and
   **`fp_edge_numeric`** (an epoch-number loaded-at) - both `unhashable`, both children always build.
 - **`fp_edge_geo`** - a `GEOGRAPHY` column left out of the hash beside an `OBJECT` and an `ARRAY` that are in it.
@@ -95,14 +95,18 @@ deploy:
 - **`fp_knob_wallclock`** - a guarded child of `fp_knob_parent` that reads the wall clock. Its meta
   `fingerprint_skip` comes from the `fp_knob_wallclock_skip` var, so the opt-out flips without moving the
   checksum.
+- **`fp_knob_scd2`** and **`fp_knob_child_of_scd2`** - an scd type 2 dim on its own source var
+  (`fp_knob_scd_source`) and a guarded child that reads `_valid_from` and `_valid_to`, as an as-of join does.
 - **59** - a `dbt compile --write-catalog` with the fingerprint on, under the build's deploy id, registers
   nothing (`fingerprint_commands`); the build step after it registers only what it selects.
 - **60** - nothing changed: the control and the wall-clock child skip, and the child of the hookless table
   builds on that parent alone.
 - **61** - the same again with `fingerprint_skip: false` on the wall-clock child, which now builds.
+- **62** - a new version of an old key closes its old row. Under the default (`fingerprint_exclude_scd_columns`
+  false) the dim reads `modified` and its guarded child builds.
 
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
-`fp_source` picks a seed, `fp_upper_email` / `fp_null_email_customer` change values below the
+`fp_source` picks a seed (a fixture may pass its own), `fp_upper_email` / `fp_null_email_customer` change values below the
 watermark, `fp_extra_column` / `fp_drop_column` change the shape, `fp_duplicate_rows`,
 `fp_bump_loaded_at` and `fp_shuffle` exercise the hash.
 
@@ -113,7 +117,7 @@ dbt deps
 ```
 
 ```bash
-# Sixty-one ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Sixty-two ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

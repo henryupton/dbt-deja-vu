@@ -96,3 +96,7 @@ models:
     description: Guarded child of fp_knob_hookless and fp_knob_parent; the unfingerprinted parent alone builds it.
   - name: fp_knob_wallclock
     description: Guarded child of fp_knob_parent that reads the wall clock; skips like any other until fp_knob_wallclock_skip sets meta fingerprint_skip false, then always builds.
+  - name: fp_knob_scd2
+    description: SCD type 2 on its own source var (fp_knob_scd_source); moving it from appended to versioned adds a new version that closes an old row.
+  - name: fp_knob_child_of_scd2
+    description: Guarded child of fp_knob_scd2 that reads _valid_from and _valid_to, as an as-of join does; builds when a version closes.

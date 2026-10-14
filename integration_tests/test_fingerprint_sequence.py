@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 61 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 62 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -29,7 +29,9 @@ deploy builds them on that verdict, though the parent reads unchanged there.
 Scenarios 58 onwards are the package knobs. A step may name its command (default build): scenario 59
 compiles with the fingerprint on, which must register nothing. Scenario 60 excludes a hookless
 materialization, which is never registered and whose guarded child always builds. Scenario 61 opts a
-guarded child out of skipping with meta fingerprint_skip false.
+guarded child out of skipping with meta fingerprint_skip false. Scenario 62 closes an scd row, which
+reads modified under the default; scenarios 4 and 48 set fingerprint_exclude_scd_columns true to pin
+the opt-in.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -127,6 +129,7 @@ SCD2_PAIR = "fp_edge_scd2 fp_edge_child_of_scd2 fp_ledger"
 
 # The package-knob group: the vars a project sets to fit the fingerprint to its own deploy.
 KNOB_VARS = {**STEADY, "fingerprint_exclude_materializations": ["hookless_table"]}
+KNOB_62 = {**KNOB_VARS, "fp_knob_scd_source": "versioned"}
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -134,7 +137,9 @@ SCENARIOS = [
          vars={"fp_source": "base", "fp_full_refresh_strategy": "replace", "fp_allow_stg_full_refresh": True}),
     dict(id=2, desc="same data, incremental", select=CORE, vars={"fp_source": "base"}),
     dict(id=3, desc="two rows appended", select=CORE, vars={"fp_source": "appended"}),
-    dict(id=4, desc="later version of an old key", select=CORE, vars={"fp_source": "versioned"}),
+    # Pins the opt-in: with the scd columns excluded the closed row is invisible and the scd2 dim reads appended.
+    dict(id=4, desc="later version of an old key (scd columns excluded)", select=CORE,
+         vars={"fp_source": "versioned", "fingerprint_exclude_scd_columns": True}),
     dict(id=5, desc="logic change (upper email), full refresh", select=CORE, flags=["--full-refresh"],
          vars={"fp_source": "versioned", "fp_upper_email": True}),
     dict(id=6, desc="full refresh, nothing changed", select=CORE, flags=["--full-refresh"],
@@ -221,7 +226,8 @@ SCENARIOS = [
          vars=EDGE_45, files={CHILD_MULTI: "changed"}),
     dict(id=47, desc="edge: the changed SQL is now the baseline; it skips again", select=EDGE, vars=EDGE_45),
     dict(id=48, desc="edge: scd2 full refresh moving only _valid_to reads unchanged with the scd columns excluded (pinned)",
-         select=SCD2_PAIR, flags=["--full-refresh"], vars={**EDGE_45, "default_valid_to": "2999-01-01 00:00:00"}),
+         select=SCD2_PAIR, flags=["--full-refresh"],
+         vars={**EDGE_45, "default_valid_to": "2999-01-01 00:00:00", "fingerprint_exclude_scd_columns": True}),
     dict(id=49, desc="edge: the same move with the scd columns included reads modified", select=SCD2_PAIR,
          flags=["--full-refresh"], vars={**EDGE_45, "fingerprint_exclude_scd_columns": False}),
     dict(id=50, desc="edge: a table built with the fingerprint off, then guarded: no baseline, builds once", steps=[
@@ -275,6 +281,8 @@ SCENARIOS = [
     # fp_knob_wallclock skipped in 60 though it reads the wall clock; the opt-out comes in by var, so its checksum holds.
     dict(id=61, desc="knob: a guarded child opted out with meta fingerprint_skip false builds though nothing changed",
          select=KNOB, vars={**KNOB_VARS, "fp_knob_wallclock_skip": False}),
+    dict(id=62, desc="knob: a new scd version closes an old row; under the default it reads modified and its guarded "
+                     "child builds", select=KNOB, vars=KNOB_62),
 ]
 
 

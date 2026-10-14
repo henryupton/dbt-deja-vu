@@ -3,3 +3,5 @@ fp_knob_parent,new
 fp_knob_child,new
 fp_knob_child_of_hookless,new
 fp_knob_wallclock,new
+fp_knob_scd2,new
+fp_knob_child_of_scd2,new

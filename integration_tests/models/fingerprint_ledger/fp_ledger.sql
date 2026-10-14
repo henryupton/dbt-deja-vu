@@ -54,6 +54,8 @@
 -- depends_on: {{ ref('fp_knob_hookless') }}
 -- depends_on: {{ ref('fp_knob_child_of_hookless') }}
 -- depends_on: {{ ref('fp_knob_wallclock') }}
+-- depends_on: {{ ref('fp_knob_scd2') }}
+-- depends_on: {{ ref('fp_knob_child_of_scd2') }}
 {% if var('fp_enable_late_child', false) %}
 -- depends_on: {{ ref('fp_child_late') }}
 {% endif %}

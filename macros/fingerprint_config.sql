@@ -13,12 +13,14 @@
     fingerprint_loaded_at_column (string):       row arrival column, default _loaded_at.
     fingerprint_exclude (list):                  columns never hashed, default [_batched_at, _written_at, _synthesised_at].
     fingerprint_exclude_scd_columns (bool):      also leave out the scd validity columns on every model, default
-                                                 true. Names come from dbt-scd2-utils' is_current_column and
+                                                 false. Names come from dbt-scd2-utils' is_current_column and
                                                  valid_to_column (model config, then the dbt_scd2_utils var),
-                                                 defaulting to _is_current and _valid_to. A new version closing
-                                                 an old row then reads appended rather than modified. The cost is that a logic change
-                                                 which only moves validity reads unchanged; set false where scd2_join
-                                                 consumers depend on those columns.
+                                                 defaulting to _is_current and _valid_to. Off, a new version that
+                                                 closes an old row reads modified, which is what an as-of join on
+                                                 _valid_to needs. On, it reads appended, and a change that only
+                                                 moves validity reads unchanged, so a child that reads those
+                                                 columns can skip on stale validity. Turn it on only where no
+                                                 child reads them.
     fingerprint_exclude_materializations (list): materializations never fingerprinted, default []. Their nodes
                                                  are not registered and their post-hook is a no-op, so a type that
                                                  never runs hooks (streamlit, semantic_view, agent, ...) no longer
@@ -117,7 +119,7 @@
 {% macro fingerprint_excluded_columns(node) %}
   {%- set cols = [] -%}
   {%- for c in var('fingerprint_exclude', ['_batched_at', '_written_at', '_synthesised_at']) -%}{%- do cols.append(c) -%}{%- endfor -%}
-  {%- if dbt_deja_vu.fingerprint_flag('fingerprint_exclude_scd_columns', true) -%}
+  {%- if dbt_deja_vu.fingerprint_flag('fingerprint_exclude_scd_columns', false) -%}
     {%- do cols.append(dbt_deja_vu.fingerprint_scd_column(node, 'is_current_column', '_is_current')) -%}
     {%- do cols.append(dbt_deja_vu.fingerprint_scd_column(node, 'valid_to_column', '_valid_to')) -%}
   {%- endif -%}
