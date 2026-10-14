@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 60 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 61 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -28,7 +28,8 @@ Scenarios 56 and 57 replace a parent in a deploy that builds none of its guarded
 deploy builds them on that verdict, though the parent reads unchanged there.
 Scenarios 58 onwards are the package knobs. A step may name its command (default build): scenario 59
 compiles with the fingerprint on, which must register nothing. Scenario 60 excludes a hookless
-materialization, which is never registered and whose guarded child always builds.
+materialization, which is never registered and whose guarded child always builds. Scenario 61 opts a
+guarded child out of skipping with meta fingerprint_skip false.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -271,6 +272,9 @@ SCENARIOS = [
          ]),
     dict(id=60, desc="knob: a hookless table excluded by materialization is never registered; its guarded child builds "
                      "though its other parent is unchanged", select=KNOB, vars=KNOB_VARS),
+    # fp_knob_wallclock skipped in 60 though it reads the wall clock; the opt-out comes in by var, so its checksum holds.
+    dict(id=61, desc="knob: a guarded child opted out with meta fingerprint_skip false builds though nothing changed",
+         select=KNOB, vars={**KNOB_VARS, "fp_knob_wallclock_skip": False}),
 ]
 
 

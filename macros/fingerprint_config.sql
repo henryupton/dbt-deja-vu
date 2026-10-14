@@ -27,7 +27,8 @@
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every
                                                  node carrying the tag is registered, default none.
 
-  Per-model meta: fingerprint_loaded_at, fingerprint_exclude (added to the global list).
+  Per-model meta: fingerprint_loaded_at, fingerprint_exclude (added to the global list), fingerprint_skip (false
+  keeps fingerprint_should_skip() from skipping the node; it is still fingerprinted for its children).
 
   The ledger is append-only: registration writes a `pending` row, the post-hook and the guard append the verdict
   row. Per deploy and node the latest real verdict counts; a `skipped` row stands only when the node recorded no

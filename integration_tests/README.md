@@ -92,9 +92,14 @@ deploy:
   materialization, which runs no hooks (the serving-layer shape), and a guarded child that also reads
   `fp_knob_parent`. The group lists `hookless_table` in `fingerprint_exclude_materializations`, so the table is
   never registered and its child always builds.
+- **`fp_knob_wallclock`** - a guarded child of `fp_knob_parent` that reads the wall clock. Its meta
+  `fingerprint_skip` comes from the `fp_knob_wallclock_skip` var, so the opt-out flips without moving the
+  checksum.
 - **59** - a `dbt compile --write-catalog` with the fingerprint on, under the build's deploy id, registers
   nothing (`fingerprint_commands`); the build step after it registers only what it selects.
-- **60** - nothing changed: the control skips, and the child of the hookless table builds on that parent alone.
+- **60** - nothing changed: the control and the wall-clock child skip, and the child of the hookless table
+  builds on that parent alone.
+- **61** - the same again with `fingerprint_skip: false` on the wall-clock child, which now builds.
 
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
 `fp_source` picks a seed, `fp_upper_email` / `fp_null_email_customer` change values below the
@@ -108,7 +113,7 @@ dbt deps
 ```
 
 ```bash
-# Sixty ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Sixty-one ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

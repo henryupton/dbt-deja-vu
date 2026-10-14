@@ -11,7 +11,9 @@
   tell why it is being built. Nor is a node whose own SQL changed, however its parents came out;
   the parents say nothing about that. Nor is a node, or a child of one, whose materialization is
   in fingerprint_exclude_materializations: it carries no verdict, so whether it was rebuilt is
-  unknown.
+  unknown. Nor is a node whose meta sets `fingerprint_skip: false`, for output that moves when its
+  parents do not (a model reading the wall clock); it is still registered and fingerprinted, so
+  its own children read its verdict as usual.
 
   The checksum is the node's own source file, so a change that alters its output only through a
   macro it calls, a var, or YAML-only config leaves the checksum equal and the guard cannot see
@@ -45,6 +47,11 @@
   {%- set node = node if node is not none else model -%}
   {%- if dbt_deja_vu.fingerprint_materialization_excluded(node) -%}
     {%- do log("fingerprint: " ~ node.name ~ " is excluded from the fingerprint by materialization; building", info=true) -%}
+    {{ return(false) }}
+  {%- endif -%}
+  {%- set opt_out = dbt_deja_vu.fingerprint_node_meta(node).get('fingerprint_skip') -%}
+  {%- if opt_out is not none and (opt_out | string | lower) in ['false', '0'] -%}
+    {%- do log("fingerprint: " ~ node.name ~ " sets meta fingerprint_skip false; building", info=true) -%}
     {{ return(false) }}
   {%- endif -%}
   {%- set parents = [] -%}

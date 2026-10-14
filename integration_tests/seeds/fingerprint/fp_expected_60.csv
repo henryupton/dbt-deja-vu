@@ -2,3 +2,4 @@ node_name,verdict
 fp_knob_parent,unchanged
 fp_knob_child,skipped
 fp_knob_child_of_hookless,new
+fp_knob_wallclock,skipped
