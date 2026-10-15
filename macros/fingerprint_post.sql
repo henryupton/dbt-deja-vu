@@ -77,7 +77,8 @@
   {%- set reg = dbt_deja_vu.fingerprint_try_query("select to_char(snapshot_at, 'YYYY-MM-DD HH24:MI:SS.FF9 TZHTZM'), loaded_at_column, pre_shape from " ~ node_rel ~ key ~ dbt_deja_vu.fingerprint_latest_row()) -%}
   {%- if not reg.ok -%}
     {%- do dbt_deja_vu.fingerprint_post_record(relation, node_rel, key, deploy_id,
-        dbt_deja_vu.fingerprint_post_failed(dbt_deja_vu.fingerprint_post_blank(), 'reading the registration', reg.error)) -%}
+        dbt_deja_vu.fingerprint_post_failed(dbt_deja_vu.fingerprint_post_blank(), 'reading the registration', reg.error),
+        registered=none) -%}
     {{ return('select 1 where false') }}
   {%- endif -%}
   {%- if reg.table.rows | length == 0 -%}
@@ -343,16 +344,16 @@
 {#
   Appends the verdict row. When that fails for a verdict other than error, an error row carrying the insert's own
   failure is tried once; when nothing can be written, a warning is logged and this run's registration stays
-  unsettled.
+  unsettled. `registered` is none when the registration itself could not be read.
 #}
-{% macro fingerprint_post_record(relation, node_rel, key, deploy_id, out) %}
+{% macro fingerprint_post_record(relation, node_rel, key, deploy_id, out, registered=true) %}
   {%- set res = dbt_deja_vu.fingerprint_try_query(dbt_deja_vu.fingerprint_post_insert_sql(node_rel, key, out)) -%}
   {%- if res.ok -%}
     {%- do log("fingerprint: " ~ relation ~ " => " ~ out.verdict ~ (" (" ~ out.detail ~ ")" if out.detail else ""), info=true) -%}
     {{ return(true) }}
   {%- endif -%}
   {%- if out.verdict == 'error' -%}
-    {{ return(dbt_deja_vu.fingerprint_post_unrecorded(relation, deploy_id, out, res.error)) }}
+    {{ return(dbt_deja_vu.fingerprint_post_unrecorded(relation, deploy_id, out, res.error, registered)) }}
   {%- endif -%}
   {%- set fallback = dbt_deja_vu.fingerprint_post_failed(dbt_deja_vu.fingerprint_post_blank(), 'recording the ' ~ out.verdict ~ ' verdict', res.error) -%}
   {%- set retried = dbt_deja_vu.fingerprint_try_query(dbt_deja_vu.fingerprint_post_insert_sql(node_rel, key, fallback)) -%}
@@ -360,12 +361,20 @@
     {%- do log("fingerprint: " ~ relation ~ " => error (" ~ fallback.detail ~ ")", info=true) -%}
     {{ return(true) }}
   {%- endif -%}
-  {{ return(dbt_deja_vu.fingerprint_post_unrecorded(relation, deploy_id, out, retried.error)) }}
+  {{ return(dbt_deja_vu.fingerprint_post_unrecorded(relation, deploy_id, out, retried.error, registered)) }}
 {% endmacro %}
 
-{% macro fingerprint_post_unrecorded(relation, deploy_id, out, error) %}
+{#
+  The warning for a verdict nothing could record. With the registration read, this run's registration stays unsettled
+  and blocks. Unread, nobody knows whether one exists: without one the build is invisible to the ledger.
+#}
+{% macro fingerprint_post_unrecorded(relation, deploy_id, out, error, registered=true) %}
+  {%- set consequence = ("Its registration in this run stays unsettled, so a guarded child that last built before it"
+      ~ " builds at its next selection, in this run or a later one") if registered else ("Its registration could not be"
+      ~ " read either, so whether this run registered it is unknown. If it did, that registration stays unsettled and its"
+      ~ " children build; if not (a contained registration failure), this build is invisible to the ledger, so deploy next"
+      ~ " with fingerprint_skip_unchanged_upstream off") -%}
   {%- do log("fingerprint: WARNING: " ~ relation ~ " recorded no verdict for deploy " ~ deploy_id ~ " (" ~ error ~ "; it would have read "
-      ~ out.verdict ~ (": " ~ out.detail if out.detail else "") ~ "). Its registration in this run stays unsettled, so a guarded"
-      ~ " child that last built before it builds at its next selection, in this run or a later one", info=true) -%}
+      ~ out.verdict ~ (": " ~ out.detail if out.detail else "") ~ "). " ~ consequence, info=true) -%}
   {{ return(false) }}
 {% endmacro %}

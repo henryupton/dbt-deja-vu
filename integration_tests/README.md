@@ -136,7 +136,8 @@ Snowflake errors, induced without any switch in the package:
 - **`fp_fault_child_of_parked`** - a guarded child of both.
 - **71** - `fingerprint_schema` is `INFORMATION_SCHEMA`, where no role can create a table: registration fails at
   its first statement, `fingerprint_contain_register_failure` contains it, and every post-hook and guard then reads
-  a ledger that is not there. Every node builds and succeeds; the next step, on the real ledger, skips as before.
+  a ledger that is not there. Every node builds and succeeds, and each post-hook warns that its registration could
+  not be read either, so the build may be invisible to the ledger; the next step, on the real ledger, skips as before.
 - **72** - the segment table goes missing while `fp_fault_parked`'s post-hook hashes: it records `error` with the
   step and Snowflake's message (`fp_fault_error_recorded` checks the detail), and its guarded child builds.
 - **73** - a run whose registration wrote nothing (a `dbt run` left off `fingerprint_commands`, the state a

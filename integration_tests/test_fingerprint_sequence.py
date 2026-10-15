@@ -178,6 +178,7 @@ REGISTER_FAILED = (r"registration for deploy \S+ failed creating the ledger in D
                    r"\(3001: ")
 GUARD_FAILED = r"fingerprint: WARNING: {} guard failed reading its parents' verdicts \(2003: "
 NO_VERDICT = r"fingerprint: WARNING: \S+\.{} recorded no verdict for deploy "
+UNREAD = NO_VERDICT + r".*\)\. Its registration could not be read either"
 NO_SKIP = r"guarded_table: skipping"
 BUILT = r"Succeeded \[[^\]]*\] model \S+\.{} "
 
@@ -379,7 +380,7 @@ SCENARIOS = [
         dict(select=FAULT_FIXTURES, vars=CONTAINED,
              expect_log=[r"fingerprint: WARNING: " + REGISTER_FAILED,
                          GUARD_FAILED.format("fp_fault_child"), GUARD_FAILED.format("fp_fault_child_of_parked"),
-                         *(NO_VERDICT.format(n) for n in FAULT_FIXTURES.split())],
+                         *(UNREAD.format(n) for n in FAULT_FIXTURES.split())],
              forbid_log=[NO_SKIP]),
         dict(select=FAULT, vars=STEADY),
     ]),
