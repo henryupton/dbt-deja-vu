@@ -18,6 +18,6 @@
       ~ " registered_at, dateadd('millisecond', 1, finished_at), replaced, pre_rows, post_rows, watermark, appended_rows,"
       ~ " touched_rows, touched_old_rows, buckets_hashed, buckets_changed, pre_shape, post_shape, checksum"
       ~ " from " ~ node_rel
-      ~ " where node_name = " ~ dbt_deja_vu.fingerprint_lit(var('fp_sql_legacy_child')) ~ " and verdict <> 'pending'"
+      ~ " where node_name = " ~ dbt_deja_vu.fingerprint_lit(var('fp_sql_legacy_child')) ~ " and verdict not in ('pending', 'reselected')"
       ~ " qualify row_number() over (order by finished_at desc nulls last, registered_at desc) = 1") }}
 {% endmacro %}

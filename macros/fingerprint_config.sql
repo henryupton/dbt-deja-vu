@@ -39,13 +39,14 @@
   Per-model meta: fingerprint_loaded_at, fingerprint_exclude (added to the global list), fingerprint_skip (false
   keeps fingerprint_should_skip() from skipping the node; it is still fingerprinted for its children).
 
-  The ledger is append-only: registration writes a `pending` row, the post-hook and the guard append the verdict
-  row. Per deploy and node the latest real verdict counts; a `skipped` row stands only when the node recorded no
-  verdict in that deploy, and `pending` only when nothing else exists. A verdict is measured against the deploy's
-  snapshot, so it is cumulative over every step and retry of the deploy, and a later skip wrote nothing. Nothing
-  updates or deletes, so threads finishing together never queue on a table lock. Verdict and skip rows carry
-  sql_hash, the md5 of the node's compiled SQL (fingerprint_sql_hash); a ledger created before that column gains it
-  at the next registration.
+  The ledger is append-only: registration writes a `pending` row (a `reselected` row when an earlier run of the
+  deploy registered the node), the post-hook and the guard append the verdict row. Per deploy and node the latest
+  real verdict counts; a `skipped` row stands only when the node recorded no verdict in that deploy, `pending` only
+  when nothing else exists, and `reselected` never. A verdict is measured against the deploy's snapshot, so it is
+  cumulative over every step and retry of the deploy, and a later skip wrote nothing. Nothing updates or deletes,
+  so threads finishing together never queue on a table lock. Every row carries invocation_id, the run that wrote
+  it; verdict and skip rows carry sql_hash, the md5 of the node's compiled SQL (fingerprint_sql_hash). A ledger
+  created before either column gains it at the next registration.
 
   Every statement the hooks and the guard issue goes through fingerprint_try_query, so a failure is reported back
   instead of raised and never fails a node. Each caller resolves it in the blocking direction: registration stops
@@ -196,12 +197,30 @@
 
 {#
   The row that counts for a deploy and node: the latest real verdict; a `skipped` row only when the node recorded
-  no verdict in that deploy; `pending` only when nothing else exists. Goes after the where clause.
+  no verdict in that deploy; `pending` only when nothing else exists. A `reselected` row, a later run's
+  registration, never counts. Goes after the where clause.
 #}
 {% macro fingerprint_latest_row() %}
   {{ return(" qualify row_number() over (partition by deploy_id, node_id order by"
-      ~ " case verdict when 'pending' then 2 when 'skipped' then 1 else 0 end,"
+      ~ " case verdict when 'reselected' then 3 when 'pending' then 2 when 'skipped' then 1 else 0 end,"
       ~ " finished_at desc nulls last, registered_at desc) = 1") }}
+{% endmacro %}
+
+{# Registration rows: the deploy's first (`pending`) and each later run's (`reselected`). Neither is an outcome. #}
+{% macro fingerprint_registration_verdicts() %}
+  {{ return("('pending', 'reselected')") }}
+{% endmacro %}
+
+{#
+  Counts the rows of `node_rel` matching `where` that are registrations no verdict or skip settled: nothing in the
+  same deploy finished after them. Each run appends one registration per node it selects, so an unsettled one is a
+  run that may have written the node's table and recorded nothing (a lost verdict, a failed build).
+#}
+{% macro fingerprint_unsettled_sql(node_rel, where) %}
+  {%- set reg = dbt_deja_vu.fingerprint_registration_verdicts() -%}
+  {{ return("(select count(*) from " ~ node_rel ~ " r where r.verdict in " ~ reg ~ " and " ~ where
+      ~ " and not exists (select 1 from " ~ node_rel ~ " o where o.deploy_id = r.deploy_id and o.node_id = r.node_id"
+      ~ " and o.verdict not in " ~ reg ~ " and o.finished_at > r.registered_at))") }}
 {% endmacro %}
 
 {# database.schema.alias as the ledger records it, from a graph node or the model context. #}
@@ -424,7 +443,7 @@
   {{ return({'found': false, 'kind': none, 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false, 'error': none}) }}
 {% endmacro %}
 
-{# Creates the ledger tables if missing and adds sql_hash to a 0.0.1 ledger. Returns none, or the error that stopped it. #}
+{# Creates the ledger tables if missing and adds sql_hash and invocation_id to an older ledger. Returns none, or the error that stopped it. #}
 {% macro fingerprint_ledger_ddl(node_rel, seg_rel) %}
   {%- set node_ddl = "
     create table if not exists " ~ node_rel ~ " (
@@ -451,7 +470,8 @@
       pre_shape         varchar,
       post_shape        varchar,
       checksum          varchar,
-      sql_hash          varchar
+      sql_hash          varchar,
+      invocation_id     varchar
     )" -%}
   {%- set seg_ddl = "
     create table if not exists " ~ seg_rel ~ " (
@@ -465,16 +485,19 @@
       changed     boolean,
       hashed_at   timestamp_tz
     )" -%}
-  {# A 0.0.1 ledger predates sql_hash. SHOW is metadata-only, so the steady state issues no DDL against a shared ledger. #}
-  {%- set has_hash = dbt_deja_vu.fingerprint_try_query("show columns like 'SQL_HASH' in table " ~ node_rel, before=[node_ddl, seg_ddl]) -%}
-  {%- if not has_hash.ok -%}
-    {{ return(has_hash.error) }}
+  {# An older ledger predates sql_hash or invocation_id. SHOW is metadata-only, so the steady state issues no DDL against a shared ledger. #}
+  {%- set shown = dbt_deja_vu.fingerprint_try_query("show columns in table " ~ node_rel, before=[node_ddl, seg_ddl]) -%}
+  {%- if not shown.ok -%}
+    {{ return(shown.error) }}
   {%- endif -%}
-  {%- if has_hash.table.rows | length == 0 -%}
-    {%- set added = dbt_deja_vu.fingerprint_try_query("alter table " ~ node_rel ~ " add column if not exists sql_hash varchar") -%}
-    {%- if not added.ok -%}
-      {{ return(added.error) }}
+  {%- set have = dbt_deja_vu.fingerprint_columns_from_show(shown.table) | map('upper') | list -%}
+  {%- for col in ['sql_hash', 'invocation_id'] -%}
+    {%- if (col | upper) not in have -%}
+      {%- set added = dbt_deja_vu.fingerprint_try_query("alter table " ~ node_rel ~ " add column if not exists " ~ col ~ " varchar") -%}
+      {%- if not added.ok -%}
+        {{ return(added.error) }}
+      {%- endif -%}
     {%- endif -%}
-  {%- endif -%}
+  {%- endfor -%}
   {{ return(none) }}
 {% endmacro %}

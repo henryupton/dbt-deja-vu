@@ -31,7 +31,8 @@
   Everything except unchanged, appended and skipped blocks a child's skip. A node skipped earlier
   in the deploy and built in a later step still records its verdict, which then outranks the skip.
   The verdict row also records sql_hash, the md5 of the compiled SQL this build ran
-  (fingerprint_sql_hash); the guard compares it at the node's next build.
+  (fingerprint_sql_hash), which the guard compares at the node's next build, and invocation_id,
+  the run that recorded it.
 
   METADATA$ROW_LAST_COMMIT_TIME names the rows this build wrote. When they are a subset of the
   table only their loaded_at months are hashed; when every row was rewritten (truncate + insert,
@@ -54,7 +55,9 @@
   failure records `error` (blocking) with the step and Snowflake's message in detail, keeping
   whatever was measured before it. When the verdict row itself cannot be written, the hook tries
   once more with an `error` row; when that fails too (the ledger is unreachable), it logs a
-  warning and the node's registration stays `pending`, which blocks its children just the same.
+  warning. This run's registration of the node then stays unsettled, which blocks its children
+  just the same, in this run and later ones (see fingerprint_should_skip), even where an earlier
+  step of the deploy recorded a verdict that outranks pending.
   A table created or replaced after the snapshot is caught from created_on before any Time
   Travel read, so Snowflake's 000707 (no data before the object's creation) cannot arise there;
   a 000707 from anything else, such as retention cut mid-deploy, records `error`.
@@ -314,7 +317,8 @@
   {{ return(
       "insert into " ~ node_rel
       ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, finished_at,"
-      ~ " replaced, pre_rows, post_rows, watermark, appended_rows, touched_rows, touched_old_rows, buckets_hashed, buckets_changed, pre_shape, post_shape, checksum, sql_hash)"
+      ~ " replaced, pre_rows, post_rows, watermark, appended_rows, touched_rows, touched_old_rows, buckets_hashed, buckets_changed, pre_shape, post_shape, checksum, sql_hash,"
+      ~ " invocation_id)"
       ~ " select deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column,"
       ~ " " ~ dbt_deja_vu.fingerprint_lit(out.verdict)
       ~ ", " ~ dbt_deja_vu.fingerprint_lit(out.detail)
@@ -332,12 +336,14 @@
       ~ ", " ~ dbt_deja_vu.fingerprint_lit(out.post_shape)
       ~ ", checksum"
       ~ ", " ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_sql_hash(model))
+      ~ ", " ~ dbt_deja_vu.fingerprint_lit(invocation_id)
       ~ " from " ~ node_rel ~ key ~ " and verdict = 'pending'") }}
 {% endmacro %}
 
 {#
   Appends the verdict row. When that fails for a verdict other than error, an error row carrying the insert's own
-  failure is tried once; when nothing can be written, a warning is logged and the registration stays pending.
+  failure is tried once; when nothing can be written, a warning is logged and this run's registration stays
+  unsettled.
 #}
 {% macro fingerprint_post_record(relation, node_rel, key, deploy_id, out) %}
   {%- set res = dbt_deja_vu.fingerprint_try_query(dbt_deja_vu.fingerprint_post_insert_sql(node_rel, key, out)) -%}
@@ -359,6 +365,7 @@
 
 {% macro fingerprint_post_unrecorded(relation, deploy_id, out, error) %}
   {%- do log("fingerprint: WARNING: " ~ relation ~ " recorded no verdict for deploy " ~ deploy_id ~ " (" ~ error ~ "; it would have read "
-      ~ out.verdict ~ (": " ~ out.detail if out.detail else "") ~ "). A registration stays pending, which blocks its children", info=true) -%}
+      ~ out.verdict ~ (": " ~ out.detail if out.detail else "") ~ "). Its registration in this run stays unsettled, so a guarded"
+      ~ " child that last built before it builds at its next selection, in this run or a later one", info=true) -%}
   {{ return(false) }}
 {% endmacro %}

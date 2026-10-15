@@ -107,7 +107,8 @@ deploy:
 - **62** - a new version of an old key closes its old row. Under the default (`fingerprint_exclude_scd_columns`
   false) the dim reads `modified` and its guarded child builds.
 - **63** - `fingerprint_register_batch_size` 1, over two steps of one deploy: every register statement carries
-  one row, and the second step's batches for the first step's nodes insert nothing.
+  one row, and the second step's batches for the first step's nodes insert a `reselected` row, never a second
+  `pending`.
 
 The `fp_sql` group (scenarios 64 onwards) holds what moves a guarded child's output without moving its
 checksum:
@@ -148,6 +149,25 @@ Snowflake errors, induced without any switch in the package:
   parent, this deploy would read it `unchanged` against its own snapshot and skip the child on stale content.
 - **77** - back to the steady state.
 
+The `fp_settle` group (scenarios 78 onwards) loses a verdict on purpose: a run that registered a node and then
+recorded nothing for it may have written its table, so that registration must keep blocking until a verdict or skip
+settles it. The fixtures:
+
+- **`fp_settle_parent`** - a merge parent; `fp_settle_flip` lowers a status below the watermark.
+- **`fp_settle_child`** - its guarded child, which also renders `fp_settle_label` into its SQL.
+- Either loses its verdict when `fp_settle_lose` names it: its pre-hook renames the node ledger away and its own
+  post-hook, after `fingerprint_post`, renames it back (`macros/fp_settle_lose_verdict.sql`). A parked ledger a
+  killed run left behind stops the build rather than being dropped.
+
+The scenarios:
+
+- **79** - the parent reads `unchanged` in step A, then in step B is rebuilt with a change and loses its verdict. Step
+  A's verdict still counts for the deploy, so only the missing record from this run builds the child.
+- **80** - the same loss in a deploy that selects no child.
+- **81** - the next deploy reads the parent `unchanged` against its own snapshot; 80's unsettled registration builds
+  the child.
+- **82** - nothing changed: the child, rebuilt since, skips.
+
 When the ledger is unreachable nothing is recorded, so a step can also assert on its own output: `expect_log` lists
 patterns that must appear (the warnings, the guard's reason for building) and `forbid_log` patterns that must not
 (`guarded_table: skipping`).
@@ -164,7 +184,7 @@ dbt deps
 ```
 
 ```bash
-# Seventy-seven ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Eighty-two ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

@@ -2,7 +2,7 @@
     config(
         materialized='view',
         enabled=(var('fingerprint', false) | string | lower) in ['true', '1'],
-        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge', 'fp_knob', 'fp_sql', 'fp_fault']
+        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge', 'fp_knob', 'fp_sql', 'fp_fault', 'fp_settle']
     )
 }}
 
@@ -64,6 +64,8 @@
 -- depends_on: {{ ref('fp_fault_child') }}
 -- depends_on: {{ ref('fp_fault_parked') }}
 -- depends_on: {{ ref('fp_fault_child_of_parked') }}
+-- depends_on: {{ ref('fp_settle_parent') }}
+-- depends_on: {{ ref('fp_settle_child') }}
 {% if var('fp_enable_late_child', false) %}
 -- depends_on: {{ ref('fp_child_late') }}
 {% endif %}

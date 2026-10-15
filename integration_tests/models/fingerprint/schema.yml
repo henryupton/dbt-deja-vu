@@ -116,3 +116,7 @@ models:
     description: Merge child of fp_fault_parent whose post-hook always hashes; with fp_fault_park_segment set its hooks take the segment ledger away, so its fingerprint fails and must read error.
   - name: fp_fault_child_of_parked
     description: Guarded child of fp_fault_parent and fp_fault_parked; builds on the error verdict, and when fp_fault_parked is built in a run that registered nothing.
+  - name: fp_settle_parent
+    description: Merge parent for the settle group (a registration a run never settles); fp_settle_flip lowers a status, and with fp_settle_lose naming it its verdict is lost.
+  - name: fp_settle_child
+    description: Guarded child of fp_settle_parent that renders fp_settle_label; builds on a parent registration that recorded nothing, and with fp_settle_lose naming it its own verdict is lost.

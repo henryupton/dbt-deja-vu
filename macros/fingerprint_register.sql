@@ -5,21 +5,26 @@
   compile, docs generate, show and test fire on-run-start too, and a registration there would
   sit pending for good and block every child.
 
-  Creates the ledger if missing (and adds sql_hash to a 0.0.1 ledger), then appends one `pending`
-  row per selected model, seed or snapshot with the deploy id, its parents, its current column
-  shape, its source checksum and `snapshot_at`, Snowflake's clock at run start. The pending row
-  carries no sql_hash: nodes are not compiled yet, so the post-hook and the skip record it. The
-  post-hook (fingerprint_post) reads the pre-build table through Time Travel at that anchor, so it
-  is deliberately the database clock and not dbt's run_started_at. A node already registered for
-  this deploy id (an earlier step of the same deploy) is left alone. Ephemeral models are not
-  registered: they have no relation and run no hooks, so they could never leave `pending`; their
-  descendants list the ephemeral's own parents instead. Nor are nodes whose materialization is in
-  fingerprint_exclude_materializations (types that never run hooks); a child of one never skips.
+  Creates the ledger if missing (and adds sql_hash and invocation_id to an older ledger), then
+  appends one `pending` row per selected model, seed or snapshot with the deploy id, its parents,
+  its current column shape, its source checksum, this run's invocation_id and `snapshot_at`,
+  Snowflake's clock at run start. The pending row carries no sql_hash: nodes are not compiled yet,
+  so the post-hook and the skip record it. The post-hook (fingerprint_post) reads the pre-build
+  table through Time Travel at that anchor, so it is deliberately the database clock and not
+  dbt's run_started_at. A node already registered for this deploy id (an earlier step of the same
+  deploy) keeps its pending row and snapshot and gets a `reselected` row for this run instead,
+  which never counts as its state but tells the guard this run may write it: a registration that
+  nothing settles (no verdict or skip after it) blocks children that last built before it.
+  Ephemeral models are not registered: they have no relation and run no hooks, so they could
+  never leave `pending`; their descendants list the ephemeral's own parents instead. Nor are
+  nodes whose materialization is in fingerprint_exclude_materializations (types that never run
+  hooks); a child of one never skips.
 
   The insert goes in statements of at most fingerprint_register_batch_size rows (default 200):
   Snowflake cannot retry a statement over 1 MB, and each row carries the node's column shape.
   Every batch keeps the already-registered check, so a failure part way leaves the earlier
-  batches registered and a retry under the same deploy id registers the rest.
+  batches registered and a retry under the same deploy id registers the rest (and reselects
+  the earlier ones).
 
   Every statement goes through fingerprint_try_query, and the first one that fails stops
   registration with whatever committed. By default it then raises while the hook renders, which
@@ -146,9 +151,10 @@
         ~ ", array_construct(" ~ (parents | join(', ')) ~ ") as parents"
         ~ ", " ~ dbt_deja_vu.fingerprint_ts_lit(snapshot_at) ~ " as snapshot_at"
         ~ ", " ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_loaded_at_column(n)) ~ " as loaded_at_column"
-        ~ ", 'pending' as verdict, null as detail, current_timestamp() as registered_at"
+        ~ ", null as detail, current_timestamp() as registered_at"
         ~ ", " ~ dbt_deja_vu.fingerprint_lit(shapes.get(item.group_key ~ '.' ~ (item.alias | upper))) ~ " as pre_shape"
         ~ ", " ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_node_checksum(n)) ~ " as checksum"
+        ~ ", " ~ dbt_deja_vu.fingerprint_lit(invocation_id) ~ " as invocation_id"
     ) -%}
   {%- endfor -%}
 
@@ -157,13 +163,20 @@
   {%- for start in range(0, rows | length, batch_size) -%}
     {%- do batches.append(rows[start:start + batch_size]) -%}
   {%- endfor -%}
+  {#
+    A node the deploy registered in an earlier run gets a `reselected` row stamped with the deploy's snapshot instead
+    of a second `pending`. The pending row stays the deploy's only one, so registration stays idempotent per deploy.
+  #}
   {%- for batch in batches -%}
     {%- set ins = dbt_deja_vu.fingerprint_try_query(
         "insert into " ~ node_rel
-        ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, pre_shape, checksum)"
-        ~ " with r as (" ~ (batch | join(' union all ')) ~ ")"
-        ~ " select r.deploy_id, r.node_id, r.node_name, r.relation_name, r.parents, r.snapshot_at, r.loaded_at_column, r.verdict, r.detail, r.registered_at, r.pre_shape, r.checksum"
-        ~ " from r where not exists (select 1 from " ~ node_rel ~ " n where n.deploy_id = r.deploy_id and n.node_id = r.node_id)"
+        ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, pre_shape, checksum, invocation_id)"
+        ~ " with r as (" ~ (batch | join(' union all ')) ~ "),"
+        ~ " registered as (select node_id, snapshot_at from " ~ node_rel ~ " where deploy_id = " ~ dbt_deja_vu.fingerprint_lit(deploy_id)
+        ~ " and verdict = 'pending' qualify row_number() over (partition by node_id order by registered_at) = 1)"
+        ~ " select r.deploy_id, r.node_id, r.node_name, r.relation_name, r.parents, coalesce(g.snapshot_at, r.snapshot_at), r.loaded_at_column,"
+        ~ " iff(g.node_id is null, 'pending', 'reselected'), r.detail, r.registered_at, r.pre_shape, r.checksum, r.invocation_id"
+        ~ " from r left join registered g on g.node_id = r.node_id"
     ) -%}
     {%- if not ins.ok -%}
       {{ return(dbt_deja_vu.fingerprint_register_failed(deploy_id, 'inserting statement ' ~ loop.index ~ ' of ' ~ (batches | length), ins.error, committed=loop.index0)) }}

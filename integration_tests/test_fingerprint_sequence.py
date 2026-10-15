@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 77 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 82 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -32,6 +32,9 @@ materialization, which is never registered and whose guarded child always builds
 guarded child out of skipping with meta fingerprint_skip false. Scenario 62 closes an scd row, which
 reads modified under the default; scenarios 4 and 48 set fingerprint_exclude_scd_columns true to pin
 the opt-in. Scenario 63 registers one row per statement across two steps of one deploy.
+Scenarios 78 onwards lose a verdict on purpose (the node ledger renamed away for the length of one
+node's fingerprint post-hook): the registration that run never settled keeps blocking, in that run
+(79) and in a later deploy (81), though an earlier step's verdict outranks pending.
 Scenarios 64 onwards are the compiled-SQL check: a rewritten macro (66) and a var (67) move a
 guarded child's compiled SQL with its checksum equal, and it builds; a hashless 0.0.1 ledger row
 as the latest build never lets a child skip (68); with nothing changed every child skips (65, 69).
@@ -67,6 +70,7 @@ EDGE = "tag:fp_edge"
 KNOB = "tag:fp_knob"
 SQL = "tag:fp_sql"
 FAULT = "tag:fp_fault"
+SETTLE = "tag:fp_settle"
 FAULT_FIXTURES = "fp_fault_parent fp_fault_child fp_fault_parked fp_fault_child_of_parked"
 
 # Files the runner rewrites mid-sequence: seeds so a reload carries changed content, one guarded model so
@@ -172,6 +176,15 @@ GUARD_FAILED = r"fingerprint: WARNING: {} guard failed reading its parents' verd
 NO_VERDICT = r"fingerprint: WARNING: \S+\.{} recorded no verdict for deploy "
 NO_SKIP = r"guarded_table: skipping"
 BUILT = r"Succeeded \[[^\]]*\] model \S+\.{} "
+
+# The settle group: a registration whose run never recorded a verdict (the node ledger taken away for the length of
+# one node's fingerprint post-hook) must keep blocking, in that run and in later ones.
+SETTLE_FLIP = {**STEADY, "fp_settle_flip": True}
+LOSE = "fp_settle_lose"
+UNRECORDED_PARENT = (r"fingerprint: fp_settle_child has 1 parent\(s\) built in this run that recorded no verdict or "
+                     r"skip in this run; building")
+UNSETTLED_PARENT = (r"fingerprint: fp_settle_child has 1 parent registration\(s\) since its last build that never "
+                    r"recorded a verdict or skip; building")
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -325,8 +338,8 @@ SCENARIOS = [
          select=KNOB, vars={**KNOB_VARS, "fp_knob_wallclock_skip": False}),
     dict(id=62, desc="knob: a new scd version closes an old row; under the default it reads modified and its guarded "
                      "child builds", select=KNOB, vars=KNOB_62),
-    # One row per register statement; B re-registers A's nodes in their own batches, which must insert nothing.
-    dict(id=63, desc="knob: registration in batches of one row; every node registers exactly once across two steps",
+    # One row per register statement; B's batches for A's nodes insert a reselected row, never a second pending.
+    dict(id=63, desc="knob: registration in batches of one row; one pending row per node across two steps",
          steps=[
              dict(select="fp_knob_parent fp_knob_scd2", vars={**KNOB_62, "fingerprint_register_batch_size": 1}),
              dict(select=KNOB, vars={**KNOB_62, "fingerprint_register_batch_size": 1}),
@@ -389,6 +402,25 @@ SCENARIOS = [
          select="fp_fault_parent fp_fault_child fp_ledger", vars={**STEADY, "fp_upper_email": False}),
     dict(id=77, desc="fault: back to the steady state; every fault fixture builds on its parent's change", select=FAULT,
          vars=STEADY),
+    # --- settle: a registration that recorded nothing keeps blocking ---------------------------------------
+    dict(id=78, desc="settle: initial, create or replace everywhere", select=SETTLE, flags=["--full-refresh"],
+         vars=STEADY),
+    # Step A's unchanged verdict outranks the lost one, so only this run's own record can tell the child.
+    dict(id=79, desc="settle: a parent rebuilt with a change in a later step loses its verdict; its guarded child in "
+                     "that step builds", steps=[
+        dict(select="fp_settle_parent", vars=STEADY),
+        dict(select="fp_settle_parent fp_settle_child fp_ledger", vars={**SETTLE_FLIP, LOSE: "fp_settle_parent"},
+             expect_log=[NO_VERDICT.format("fp_settle_parent"), UNRECORDED_PARENT], forbid_log=[NO_SKIP]),
+    ]),
+    dict(id=80, desc="settle: the same loss in a deploy that builds no child", steps=[
+        dict(select="fp_settle_parent", vars=SETTLE_FLIP),
+        dict(select="fp_settle_parent fp_ledger", vars={**STEADY, LOSE: "fp_settle_parent"},
+             expect_log=[NO_VERDICT.format("fp_settle_parent")]),
+    ]),
+    dict(id=81, desc="settle: the next deploy reads the parent unchanged and builds the child on 80's unsettled "
+                     "registration", select="fp_settle_parent fp_settle_child fp_ledger", vars=STEADY,
+         expect_log=[UNSETTLED_PARENT], forbid_log=[NO_SKIP]),
+    dict(id=82, desc="settle: nothing changed; the child, built since, skips", select=SETTLE, vars=STEADY),
 ]
 
 
