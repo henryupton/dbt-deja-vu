@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 82 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 86 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -32,10 +32,7 @@ materialization, which is never registered and whose guarded child always builds
 guarded child out of skipping with meta fingerprint_skip false. Scenario 62 closes an scd row, which
 reads modified under the default; scenarios 4 and 48 set fingerprint_exclude_scd_columns true to pin
 the opt-in. Scenario 63 registers one row per statement across two steps of one deploy.
-Scenarios 78 onwards lose a verdict on purpose (the node ledger renamed away for the length of one
-node's fingerprint post-hook): the registration that run never settled keeps blocking, in that run
-(79) and in a later deploy (81), though an earlier step's verdict outranks pending.
-Scenarios 64 onwards are the compiled-SQL check: a rewritten macro (66) and a var (67) move a
+Scenarios 64 to 69 are the compiled-SQL check: a rewritten macro (66) and a var (67) move a
 guarded child's compiled SQL with its checksum equal, and it builds; a hashless 0.0.1 ledger row
 as the latest build never lets a child skip (68); with nothing changed every child skips (65, 69).
 Scenarios 70 to 77 are faults inside the fingerprint, which must never fail a node or become a skip:
@@ -44,6 +41,11 @@ post-hook hashes (72), and a parent built in a run that registered nothing (73).
 registration failure stops the run before a parent's change builds (75), so the next deploy still
 sees the change and builds its child (76). Nothing is recorded when the ledger is unreachable, so a
 step may also assert on its output: expect_log patterns must appear, forbid_log patterns must not.
+Scenarios 78 to 86 lose a verdict on purpose (the node ledger renamed away for the length of one
+node's fingerprint post-hook): the registration that run never settled keeps blocking, though an
+earlier step's verdict outranks pending. A parent's builds its child in that run (79) and in a later
+deploy (81); a guarded child's own builds it at its next selection, with its SQL back as it was, in
+another deploy (84) or a later step of its own (85).
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -185,6 +187,9 @@ UNRECORDED_PARENT = (r"fingerprint: fp_settle_child has 1 parent\(s\) built in t
                      r"skip in this run; building")
 UNSETTLED_PARENT = (r"fingerprint: fp_settle_child has 1 parent registration\(s\) since its last build that never "
                     r"recorded a verdict or skip; building")
+UNSETTLED_SELF = (r"fingerprint: fp_settle_child was registered since its last build by 1 run\(s\) that recorded no "
+                  r"verdict or skip for it; building")
+SETTLE_LABEL = {**STEADY, "fp_settle_label": "changed"}
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -421,6 +426,22 @@ SCENARIOS = [
                      "registration", select="fp_settle_parent fp_settle_child fp_ledger", vars=STEADY,
          expect_log=[UNSETTLED_PARENT], forbid_log=[NO_SKIP]),
     dict(id=82, desc="settle: nothing changed; the child, built since, skips", select=SETTLE, vars=STEADY),
+    # The child's own build under other compiled SQL loses its verdict; reverting the var makes its SQL match its last
+    # recorded build again, with its checksum equal throughout, so only the unsettled registration can build it.
+    dict(id=83, desc="settle: the guarded child builds under a changed var and loses its own verdict",
+         select="fp_settle_parent fp_settle_child fp_ledger", vars={**SETTLE_LABEL, LOSE: "fp_settle_child"},
+         expect_log=[NO_VERDICT.format("fp_settle_child")]),
+    dict(id=84, desc="settle: the var reverted, a new deploy builds the child on 83's unsettled registration",
+         select="fp_settle_parent fp_settle_child fp_ledger", vars=STEADY,
+         expect_log=[UNSETTLED_SELF], forbid_log=[NO_SKIP]),
+    dict(id=85, desc="settle: the same within one deploy; step A's unsettled registration builds the child in step B",
+         steps=[
+             dict(select="fp_settle_parent fp_settle_child", vars={**SETTLE_LABEL, LOSE: "fp_settle_child"},
+                  expect_log=[NO_VERDICT.format("fp_settle_child")]),
+             dict(select="fp_settle_parent fp_settle_child fp_ledger", vars=STEADY,
+                  expect_log=[UNSETTLED_SELF], forbid_log=[NO_SKIP]),
+         ]),
+    dict(id=86, desc="settle: nothing changed; the child skips again", select=SETTLE, vars=STEADY),
 ]
 
 

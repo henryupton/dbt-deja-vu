@@ -149,7 +149,7 @@ Snowflake errors, induced without any switch in the package:
   parent, this deploy would read it `unchanged` against its own snapshot and skip the child on stale content.
 - **77** - back to the steady state.
 
-The `fp_settle` group (scenarios 78 onwards) loses a verdict on purpose: a run that registered a node and then
+The `fp_settle` group (scenarios 78 to 86) loses a verdict on purpose: a run that registered a node and then
 recorded nothing for it may have written its table, so that registration must keep blocking until a verdict or skip
 settles it. The fixtures:
 
@@ -167,6 +167,11 @@ The scenarios:
 - **81** - the next deploy reads the parent `unchanged` against its own snapshot; 80's unsettled registration builds
   the child.
 - **82** - nothing changed: the child, rebuilt since, skips.
+- **83** - `fp_settle_label` changes, so the child builds under other compiled SQL, and loses its own verdict.
+- **84** - the label reverted, the child's SQL and checksum match its last recorded build again, and its parent
+  reads `unchanged`; 83's unsettled registration of the child builds it.
+- **85** - the same within one deploy: step A's unsettled registration builds the child in step B.
+- **86** - nothing changed: the child skips.
 
 When the ledger is unreachable nothing is recorded, so a step can also assert on its own output: `expect_log` lists
 patterns that must appear (the warnings, the guard's reason for building) and `forbid_log` patterns that must not
@@ -184,7 +189,7 @@ dbt deps
 ```
 
 ```bash
-# Eighty-two ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Eighty-six ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

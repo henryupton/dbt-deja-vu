@@ -34,9 +34,9 @@
   parent was rebuilt after the node read it); a blocking verdict or a `pending` row for a parent in
   another deploy (a change the node never read); a parent registration from another run that no
   verdict or skip settled (a lost verdict, which an earlier step's verdict would otherwise hide);
-  and a registration of the node under another checksum that recorded no verdict (a build whose
-  hooks failed after the table was written). Registration precedes compilation, so it carries no
-  compiled SQL hash to compare.
+  and a registration of the node itself from another run that nothing settled (a build that may
+  have written the table before it failed or lost its verdict), whatever its checksum or compiled
+  SQL. That costs one extra build after a failed or interrupted run, the safe direction.
 
   Writes the ledger never saw, from a run with the fingerprint off, are invisible to the guard. A
   run that builds parents and their children together leaves them in step. After one that rebuilt
@@ -185,20 +185,18 @@
   {%- endif -%}
 
   {#
-    The ledger since the node's last build or skip (`since`). unseen: a later registration of this relation under
-    another checksum with no verdict. moved, per parent and deploy on the row that counts: a verdict whose snapshot
-    predates `since` (the parent was rebuilt after the node read it), or a blocking verdict or pending row in
-    another deploy. This deploy's own verdicts after its snapshot are the ones checked above. unsettled: a parent
-    registration since `since`, from another run, that no verdict or skip settled, which a lost verdict in a later
-    step of a deploy leaves behind an earlier step's verdict that still counts.
+    The ledger since the node's last build or skip (`since`). unseen: a registration of this relation since then,
+    from another run, that no verdict or skip settled, whatever its checksum. moved, per parent and deploy on the
+    row that counts: a verdict whose snapshot predates `since` (the parent was rebuilt after the node read it), or
+    a blocking verdict or pending row in another deploy. This deploy's own verdicts after its snapshot are the ones
+    checked above. unsettled: a parent registration since `since`, from another run, that no verdict or skip
+    settled, which a lost verdict in a later step of a deploy leaves behind an earlier step's verdict that counts.
   #}
   {%- set since = dbt_deja_vu.fingerprint_ts_lit(base.rows[0][2]) -%}
   {%- set since_registered = dbt_deja_vu.fingerprint_ts_lit(base.rows[0][3]) -%}
   {%- set since_res = dbt_deja_vu.fingerprint_try_query(
-      "select (select count(*) from " ~ node_rel
-      ~ " where node_id = " ~ node_lit ~ " and relation_name = " ~ rel_lit
-      ~ " and registered_at > " ~ since_registered
-      ~ " and checksum is distinct from " ~ dbt_deja_vu.fingerprint_lit(current) ~ ") as unseen,"
+      "select " ~ dbt_deja_vu.fingerprint_unsettled_sql(node_rel, "r.node_id = " ~ node_lit ~ " and r.relation_name = " ~ rel_lit
+          ~ " and r.registered_at > " ~ since_registered ~ " and r.invocation_id is distinct from " ~ run_lit) ~ " as unseen,"
       ~ " (select count(*) from (select deploy_id, verdict, snapshot_at from " ~ node_rel
       ~ " where node_id in (" ~ (parents | join(', ')) ~ ") and verdict <> 'reselected'"
       ~ " and coalesce(finished_at, registered_at) > " ~ since
@@ -212,7 +210,7 @@
   {%- endif -%}
   {%- set later = since_res.table.rows[0] -%}
   {%- if later[0] | int > 0 -%}
-    {%- do log("fingerprint: " ~ node.name ~ " was registered under another checksum since its last build and recorded no verdict; building", info=true) -%}
+    {%- do log("fingerprint: " ~ node.name ~ " was registered since its last build by " ~ (later[0] | int) ~ " run(s) that recorded no verdict or skip for it; building", info=true) -%}
     {{ return(false) }}
   {%- elif later[1] | int > 0 -%}
     {%- do log("fingerprint: " ~ node.name ~ " has " ~ (later[1] | int) ~ " parent verdict(s) since its last build that this deploy's verdicts do not cover; building", info=true) -%}
