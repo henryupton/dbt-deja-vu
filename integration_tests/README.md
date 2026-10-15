@@ -123,8 +123,9 @@ checksum:
 - **68** - a hashless row planted as the control's latest build: the control builds.
 - **69** - nothing changed again: every child skips on the hashes recorded since.
 
-The `fp_fault` group (scenarios 70 onwards) holds statements that fail inside the fingerprint, which must never fail
-a node or turn into a skip. The faults are real Snowflake errors, induced without any switch in the package:
+The `fp_fault` group (scenarios 70 to 77) holds statements that fail inside the fingerprint, which must never fail
+a node or turn into a skip; a failed registration instead stops the run unless it is contained. The faults are real
+Snowflake errors, induced without any switch in the package:
 
 - **`fp_fault_parent`** and **`fp_fault_child`** - a merge parent that stays unchanged after the group's initial,
   and its guarded child, the control that skips whenever the ledger works.
@@ -133,14 +134,19 @@ a node or turn into a skip. The faults are real Snowflake errors, induced withou
   runs after `fingerprint_post`, renames it back (`macros/fp_fault_park_segment.sql`).
 - **`fp_fault_child_of_parked`** - a guarded child of both.
 - **71** - `fingerprint_schema` is `INFORMATION_SCHEMA`, where no role can create a table: registration fails at
-  its first statement, and every post-hook and guard then reads a ledger that is not there. Every node builds and
-  succeeds; the next step, on the real ledger, skips as before.
+  its first statement, `fingerprint_contain_register_failure` contains it, and every post-hook and guard then reads
+  a ledger that is not there. Every node builds and succeeds; the next step, on the real ledger, skips as before.
 - **72** - the segment table goes missing while `fp_fault_parked`'s post-hook hashes: it records `error` with the
   step and Snowflake's message (`fp_fault_error_recorded` checks the detail), and its guarded child builds.
 - **73** - a run whose registration wrote nothing (a `dbt run` left off `fingerprint_commands`, the state a
   contained registration failure leaves) rebuilds `fp_fault_parked`; its guarded child builds in that run, though
   its other parent is registered and unchanged.
 - **74** - nothing changed: the segment table is back and every guarded child skips.
+- **75** - the same unreachable ledger under the default, with a change to `fp_fault_parent`: the run fails before
+  the parent builds.
+- **76** - a new deploy builds the change, which reads `modified`, and `fp_fault_child` builds. Had 75 built the
+  parent, this deploy would read it `unchanged` against its own snapshot and skip the child on stale content.
+- **77** - back to the steady state.
 
 When the ledger is unreachable nothing is recorded, so a step can also assert on its own output: `expect_log` lists
 patterns that must appear (the warnings, the guard's reason for building) and `forbid_log` patterns that must not
@@ -158,7 +164,7 @@ dbt deps
 ```
 
 ```bash
-# Seventy-four ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Seventy-seven ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

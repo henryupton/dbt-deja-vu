@@ -28,6 +28,10 @@
                                                  nothing fingerprinted it.
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every
                                                  node carrying the tag is registered, default none.
+    fingerprint_contain_register_failure (bool): default false, so a registration failure stops the run before any
+                                                 node builds. On, it logs a warning and the run builds where the
+                                                 ledger cannot see it, so a later run can skip a child of anything
+                                                 it rebuilt on stale content.
     fingerprint_register_batch_size (int):       rows per registration insert, default 200. Snowflake cannot retry
                                                  a statement over 1 MB, which one insert reaches at about 500
                                                  nodes; lower it for very wide tables, whose shape rides on the row.
@@ -44,8 +48,8 @@
   at the next registration.
 
   Every statement the hooks and the guard issue goes through fingerprint_try_query, so a failure is reported back
-  instead of raised and never fails a node or a run. Each caller resolves it in the blocking direction: registration
-  stops, the post-hook records `error`, the guard builds.
+  instead of raised and never fails a node. Each caller resolves it in the blocking direction: registration stops
+  the run (or, contained, stops registering), the post-hook records `error`, the guard builds.
 #}
 
 {# A var as a bool on both engines. dbt-core's macro environment leaves `as_bool` as identity, so "false" would be truthy. #}
@@ -105,7 +109,7 @@
 
 {#
   Runs `sql` inside a Snowflake Scripting block whose exception branch returns a sentinel row instead of raising,
-  so no statement the fingerprint issues can fail a node or a run (Jinja has no try). Statements in `before` run
+  so the caller decides what a failed statement means (Jinja has no try). Statements in `before` run
   first in the same block: a SHOW whose result_scan(last_query_id()) the query reads, or an insert it aggregates.
   Each statement travels as a string and runs through `execute immediate`, so even a syntax error reaches the
   handler. The block is a single-quoted literal, never $$: a $$ inside a $$ block came back as an empty result with

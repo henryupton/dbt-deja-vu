@@ -41,8 +41,9 @@
   `fingerprint_skip_unchanged_upstream` off.
 
   A parent selected in this run with no registration in this deploy also builds the node: its
-  registration failed (or the command is not in fingerprint_commands), so its build in this run is
-  invisible to the ledger and nothing vouches for it.
+  registration failed under fingerprint_contain_register_failure (or the command is not in
+  fingerprint_commands), so its build in this run is invisible to the ledger and nothing vouches
+  for it.
 
   fingerprint_mark_skipped() appends the skip so the node's own children can read it. The skip row
   carries the node's compiled SQL hash too, since it is the baseline the node's next build reads.

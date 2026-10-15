@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 74 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 77 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -35,11 +35,12 @@ the opt-in. Scenario 63 registers one row per statement across two steps of one 
 Scenarios 64 onwards are the compiled-SQL check: a rewritten macro (66) and a var (67) move a
 guarded child's compiled SQL with its checksum equal, and it builds; a hashless 0.0.1 ledger row
 as the latest build never lets a child skip (68); with nothing changed every child skips (65, 69).
-Scenarios 70 onwards are faults inside the fingerprint, which must never fail a node or become a skip:
-a ledger schema the role cannot create in (71), the segment ledger renamed away while a post-hook
-hashes (72), and a parent built in a run that registered nothing (73). Nothing is recorded when the
-ledger is unreachable, so a step may also assert on its output: expect_log patterns must appear,
-forbid_log patterns must not.
+Scenarios 70 to 77 are faults inside the fingerprint, which must never fail a node or become a skip:
+a ledger schema the role cannot create in, contained (71), the segment ledger renamed away while a
+post-hook hashes (72), and a parent built in a run that registered nothing (73). Uncontained, that
+registration failure stops the run before a parent's change builds (75), so the next deploy still
+sees the change and builds its child (76). Nothing is recorded when the ledger is unreachable, so a
+step may also assert on its output: expect_log patterns must appear, forbid_log patterns must not.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -164,9 +165,13 @@ SQL_67 = {**STEADY, "fp_sql_label": "changed"}
 # The fault group: a ledger the role cannot create, and log lines that show each failure was contained. Nothing is
 # recorded when the ledger is unreachable, so the step's output is the evidence that the guards built.
 UNREACHABLE = {**STEADY, "fingerprint_schema": "INFORMATION_SCHEMA"}
+CONTAINED = {**UNREACHABLE, "fingerprint_contain_register_failure": True}
+REGISTER_FAILED = (r"registration for deploy \S+ failed creating the ledger in DEV_ANALYTICS\.INFORMATION_SCHEMA "
+                   r"\(3001: ")
 GUARD_FAILED = r"fingerprint: WARNING: {} guard failed reading its parents' verdicts \(2003: "
 NO_VERDICT = r"fingerprint: WARNING: \S+\.{} recorded no verdict for deploy "
 NO_SKIP = r"guarded_table: skipping"
+BUILT = r"Succeeded \[[^\]]*\] model \S+\.{} "
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -343,13 +348,12 @@ SCENARIOS = [
     # --- faults: statements that fail inside the fingerprint must never fail the node or skip a build ----------
     dict(id=70, desc="fault: initial, create or replace everywhere", select=FAULT, flags=["--full-refresh"],
          vars=STEADY),
-    # INFORMATION_SCHEMA takes no table, so registration fails at its first statement, and every post-hook and guard
-    # then reads a ledger that is not there. The second step, on the real ledger, is the recovery.
-    dict(id=71, desc="fault: a ledger schema the role cannot create in; nothing registers, every node builds and "
-                     "succeeds, every guard builds; the next step skips as before", steps=[
-        dict(select=FAULT_FIXTURES, vars=UNREACHABLE,
-             expect_log=[r"fingerprint: WARNING: registration for deploy \S+ failed creating the ledger in "
-                         r"DEV_ANALYTICS\.INFORMATION_SCHEMA \(3001: ",
+    # INFORMATION_SCHEMA takes no table, so registration fails at its first statement; contained, every post-hook and
+    # guard then reads a ledger that is not there. The second step, on the real ledger, is the recovery.
+    dict(id=71, desc="fault: a ledger schema the role cannot create in, contained; nothing registers, every node builds "
+                     "and succeeds, every guard builds; the next step skips as before", steps=[
+        dict(select=FAULT_FIXTURES, vars=CONTAINED,
+             expect_log=[r"fingerprint: WARNING: " + REGISTER_FAILED,
                          GUARD_FAILED.format("fp_fault_child"), GUARD_FAILED.format("fp_fault_child_of_parked"),
                          *(NO_VERDICT.format(n) for n in FAULT_FIXTURES.split())],
              forbid_log=[NO_SKIP]),
@@ -375,6 +379,15 @@ SCENARIOS = [
              dict(select="fp_ledger", vars=STEADY),
          ]),
     dict(id=74, desc="fault: nothing changed; the segment ledger is back and every guarded child skips", select=FAULT,
+         vars=STEADY),
+    # Uncontained, the failed registration stops the run, so the parent's change never lands where no later deploy
+    # could see it. Had it landed, 76 would find the parent unchanged against its own snapshot and skip the child.
+    dict(id=75, desc="fault: registration fails under the default; the run stops before the parent's change builds",
+         select="fp_fault_parent", vars={**UNREACHABLE, "fp_upper_email": False}, expect_fail=True,
+         expect_log=[REGISTER_FAILED], forbid_log=[BUILT.format("fp_fault_parent")]),
+    dict(id=76, desc="fault: the next deploy builds the change, which reads modified, and its guarded child builds",
+         select="fp_fault_parent fp_fault_child fp_ledger", vars={**STEADY, "fp_upper_email": False}),
+    dict(id=77, desc="fault: back to the steady state; every fault fixture builds on its parent's change", select=FAULT,
          vars=STEADY),
 ]
 
@@ -451,6 +464,7 @@ def main() -> int:
             print(f"[fingerprint] wrote {path} variant {variant!r}", flush=True)
 
         steps = sc.get("steps") or [dict(select=sc["select"], flags=sc.get("flags", []), vars=sc.get("vars", {}),
+                                         expect_fail=sc.get("expect_fail", False),
                                          expect_log=sc.get("expect_log", []), forbid_log=sc.get("forbid_log", []))]
         ok = True
         last_vars = None

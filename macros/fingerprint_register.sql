@@ -21,12 +21,15 @@
   Every batch keeps the already-registered check, so a failure part way leaves the earlier
   batches registered and a retry under the same deploy id registers the rest.
 
-  A failure never fails the hook, so it cannot skip a run (skip_nodes_if_on_run_start_fails):
-  every statement goes through fingerprint_try_query, and the first one that fails logs a
-  warning and stops registration with whatever committed. An unregistered node builds as usual,
-  its post-hook is a no-op, and a guarded child built in the same run builds too, since a parent
-  selected here with no registration cannot vouch for itself. Later runs of the deploy cannot see
-  what this run built, as with the fingerprint off; the warning says so.
+  Every statement goes through fingerprint_try_query, and the first one that fails stops
+  registration with whatever committed. By default it then raises while the hook renders, which
+  stops the run before any node builds on Fusion and on dbt-core alike (a failing hook statement
+  would not on dbt-core without skip_nodes_if_on_run_start_fails): a node built without a
+  registration writes where the ledger cannot see it, and a later deploy, snapshotting after
+  that write, would read its parent unchanged and skip a child that never read it. With
+  fingerprint_contain_register_failure on it logs a warning instead and the run goes on: an
+  unregistered node builds unfingerprinted, a guarded child built in the same run builds, and
+  what the run rebuilt stays invisible to later runs and deploys, as with the fingerprint off.
 
     on-run-start:
       - "{{ dbt_deja_vu.fingerprint_register() }}"
@@ -35,15 +38,21 @@
 #}
 
 {#
-  Logs why registration stopped and returns the hook's no-op. `committed` counts the insert statements that had
-  already gone through.
+  Stops the run, or under fingerprint_contain_register_failure logs a warning and returns the hook's no-op.
+  `committed` counts the insert statements that had already gone through.
 #}
 {% macro fingerprint_register_failed(deploy_id, step, error, committed=0) %}
-  {%- do log("fingerprint: WARNING: registration for deploy " ~ deploy_id ~ " failed " ~ step ~ " (" ~ error ~ "); "
-      ~ committed ~ " insert statement(s) had committed and nothing more is registered. Unregistered nodes build"
-      ~ " unfingerprinted and their guarded children in this run build; later runs of this deploy cannot see what"
-      ~ " this run built, so run them with fingerprint_skip_unchanged_upstream off", info=true) -%}
-  {{ return('select 1 where false') }}
+  {%- set what = "registration for deploy " ~ deploy_id ~ " failed " ~ step ~ " (" ~ error ~ "); " ~ committed
+      ~ " insert statement(s) had committed" -%}
+  {%- if dbt_deja_vu.fingerprint_flag('fingerprint_contain_register_failure') -%}
+    {%- do log("fingerprint: WARNING: " ~ what ~ " and nothing more is registered. fingerprint_contain_register_failure"
+        ~ " is on, so the run builds where the ledger cannot see it: a guarded child built in this run builds, but a later"
+        ~ " run or deploy can skip a child of anything this run rebuilt on stale content. Deploy next with"
+        ~ " fingerprint_skip_unchanged_upstream off", info=true) -%}
+    {{ return('select 1 where false') }}
+  {%- endif -%}
+  {{ exceptions.raise_compiler_error("fingerprint: " ~ what ~ ". The run stops so nothing builds where the ledger cannot"
+      ~ " see it; fix the cause and rerun, or set fingerprint_contain_register_failure to build anyway") }}
 {% endmacro %}
 
 {% macro fingerprint_register() %}
