@@ -42,6 +42,10 @@
   updates or deletes, so threads finishing together never queue on a table lock. Verdict and skip rows carry
   sql_hash, the md5 of the node's compiled SQL (fingerprint_sql_hash); a ledger created before that column gains it
   at the next registration.
+
+  Every statement the hooks and the guard issue goes through fingerprint_try_query, so a failure is reported back
+  instead of raised and never fails a node or a run. Each caller resolves it in the blocking direction: registration
+  stops, the post-hook records `error`, the guard builds.
 #}
 
 {# A var as a bool on both engines. dbt-core's macro environment leaves `as_bool` as identity, so "false" would be truthy. #}
@@ -80,6 +84,56 @@
 
 {% macro fingerprint_deploy_id() %}
   {{ return(var('deploy_id', invocation_id)) }}
+{% endmacro %}
+
+{#
+  The unique_ids this run builds: selected_resources, or for runtimes without it every node carrying the
+  fingerprint_select_tag var. Registration enrols these, and the guard reads it to tell a parent built in this run
+  from one that was not.
+#}
+{% macro fingerprint_selected_ids() %}
+  {%- set selected = [] -%}
+  {%- if selected_resources is defined and selected_resources -%}
+    {%- for uid in selected_resources -%}{%- do selected.append(uid) -%}{%- endfor -%}
+  {%- elif var('fingerprint_select_tag', none) is not none and graph is defined -%}
+    {%- for uid, n in graph.nodes.items() -%}
+      {%- if var('fingerprint_select_tag') in (n.tags or []) -%}{%- do selected.append(uid) -%}{%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {{ return(selected) }}
+{% endmacro %}
+
+{#
+  Runs `sql` inside a Snowflake Scripting block whose exception branch returns a sentinel row instead of raising,
+  so no statement the fingerprint issues can fail a node or a run (Jinja has no try). Statements in `before` run
+  first in the same block: a SHOW whose result_scan(last_query_id()) the query reads, or an insert it aggregates.
+  Each statement travels as a string and runs through `execute immediate`, so even a syntax error reaches the
+  handler. The block is a single-quoted literal, never $$: a $$ inside a $$ block came back as an empty result with
+  no error on Fusion. Returns {'ok', 'table', 'code', 'error'}: table is the last statement's result when ok; code
+  is Snowflake's sqlcode, and error "<sqlcode>: <sqlerrm>" on one line, capped at 1,000 characters. A block costs
+  about 0.35 s of Snowflake time over the bare statement, so callers fold dependent statements into one call.
+#}
+{% macro fingerprint_try_query(sql, before=none) %}
+  {%- set sentinel = '__fingerprint_try_error__' -%}
+  {%- set declare = ['res resultset', 'q varchar default ' ~ dbt_deja_vu.fingerprint_lit(sql)] -%}
+  {%- set run_first = [] -%}
+  {%- for stmt in (before or []) -%}
+    {%- do declare.append('b' ~ loop.index ~ ' varchar default ' ~ dbt_deja_vu.fingerprint_lit(stmt)) -%}
+    {%- do run_first.append('execute immediate :b' ~ loop.index ~ ';') -%}
+  {%- endfor -%}
+  {%- set block = "declare " ~ (declare | join('; ')) ~ "; begin " ~ (run_first | join(' '))
+      ~ " res := (execute immediate :q); return table(res);"
+      ~ " exception when other then let code varchar := sqlcode; let msg varchar := sqlerrm;"
+      ~ " res := (select '" ~ sentinel ~ "' as fingerprint_try_error, :code as code, :msg as message); return table(res);"
+      ~ " end;" -%}
+  {%- set res = run_query("execute immediate " ~ dbt_deja_vu.fingerprint_lit(block)) -%}
+  {%- if (res.columns | length) == 3 and (res.columns[0].name | upper) == 'FINGERPRINT_TRY_ERROR'
+      and (res.rows | length) == 1 and res.rows[0][0] == sentinel -%}
+    {%- set message = (res.rows[0][2] | string) | replace('\r', ' ') | replace('\n', ' ') -%}
+    {{ return({'ok': false, 'table': none, 'code': res.rows[0][1] | string,
+               'error': ((res.rows[0][1] | string) ~ ': ' ~ message)[:1000]}) }}
+  {%- endif -%}
+  {{ return({'ok': true, 'table': res, 'code': none, 'error': none}) }}
 {% endmacro %}
 
 {% macro fingerprint_schema() %}
@@ -238,12 +292,16 @@
   {{ return(local_md5(code | string)) }}
 {% endmacro %}
 
-{# SQL literal helpers: none -> null, strings quoted and escaped, everything else as-is. #}
+{#
+  SQL literal helpers: none -> null, strings quoted and escaped, everything else as-is. Snowflake reads backslash
+  escapes in single-quoted strings, so backslashes are doubled with the quotes: any text round-trips, which
+  fingerprint_try_query relies on to pass whole statements (and Snowflake error messages) as literals.
+#}
 {% macro fingerprint_lit(value) %}
   {%- if value is none -%}
     {{ return('null') }}
   {%- elif value is string -%}
-    {{ return("'" ~ (value | replace("'", "''")) ~ "'") }}
+    {{ return("'" ~ (value | replace("\\", "\\\\") | replace("'", "''")) ~ "'") }}
   {%- elif value is sameas true -%}
     {{ return('true') }}
   {%- elif value is sameas false -%}
@@ -323,42 +381,48 @@
   name is re-checked. Returns {'found', 'kind', 'replaced', 'retention', 'expired', 'row_timestamp', 'is_iceberg',
   'is_dynamic'} with kind 'table', 'view' or none. expired is true when the snapshot is older than the table's
   Time Travel retention (a stable deploy_id re-run days later), where an `at()` read would fail the node.
-  row_timestamp is read here because METADATA$ROW_LAST_COMMIT_TIME is an invalid identifier on a table without it,
-  and a hook error fails the node.
+  row_timestamp is read here because METADATA$ROW_LAST_COMMIT_TIME is an invalid identifier on a table without it.
+  The SHOW and its result_scan share one fingerprint_try_query block. A failed lookup returns {'error': message}
+  alone; every other answer carries 'error': none.
 #}
 {% macro fingerprint_object_info(relation, snap) %}
   {%- set name_lit = dbt_deja_vu.fingerprint_lit(relation.identifier) -%}
   {%- set in_schema = " in schema " ~ relation.database ~ "." ~ relation.schema -%}
-  {%- set tables = run_query("show tables like " ~ name_lit ~ in_schema) -%}
-  {%- if tables.rows | length > 0 -%}
-    {# SHOW TABLES reports retention_time as varchar. #}
-    {%- set info = run_query(
-        "select \"kind\", \"retention_time\", \"created_on\" > " ~ snap ~ " as replaced,"
-        ~ " \"row_timestamp\", \"is_iceberg\", \"is_dynamic\","
-        ~ " " ~ snap ~ " < dateadd('day', -try_to_number(\"retention_time\"::varchar), current_timestamp()) as expired"
-        ~ " from table(result_scan(last_query_id())) where upper(\"name\") = upper(" ~ name_lit ~ ")") -%}
-    {%- if info.rows | length > 0 -%}
-      {%- set r = info.rows[0] -%}
-      {{ return({'found': true, 'kind': 'table', 'replaced': r[2], 'retention': r[1] | int,
-                 'expired': (r[6] | string | lower) == 'true',
-                 'row_timestamp': (r[3] | string | upper) == 'ON',
-                 'is_iceberg': (r[4] | string | upper) == 'Y',
-                 'is_dynamic': (r[5] | string | upper) == 'Y'}) }}
-    {%- endif -%}
+  {# SHOW TABLES reports retention_time as varchar. #}
+  {%- set info = dbt_deja_vu.fingerprint_try_query(
+      "select \"kind\", \"retention_time\", \"created_on\" > " ~ snap ~ " as replaced,"
+      ~ " \"row_timestamp\", \"is_iceberg\", \"is_dynamic\","
+      ~ " " ~ snap ~ " < dateadd('day', -try_to_number(\"retention_time\"::varchar), current_timestamp()) as expired"
+      ~ " from table(result_scan(last_query_id())) where upper(\"name\") = upper(" ~ name_lit ~ ")",
+      before=["show tables like " ~ name_lit ~ in_schema]) -%}
+  {%- if not info.ok -%}
+    {{ return({'error': info.error}) }}
   {%- endif -%}
-  {%- set views = run_query("show views like " ~ name_lit ~ in_schema) -%}
+  {%- if info.table.rows | length > 0 -%}
+    {%- set r = info.table.rows[0] -%}
+    {{ return({'found': true, 'kind': 'table', 'replaced': r[2], 'retention': r[1] | int,
+               'expired': (r[6] | string | lower) == 'true',
+               'row_timestamp': (r[3] | string | upper) == 'ON',
+               'is_iceberg': (r[4] | string | upper) == 'Y',
+               'is_dynamic': (r[5] | string | upper) == 'Y', 'error': none}) }}
+  {%- endif -%}
+  {%- set views = dbt_deja_vu.fingerprint_try_query("show views like " ~ name_lit ~ in_schema) -%}
+  {%- if not views.ok -%}
+    {{ return({'error': views.error}) }}
+  {%- endif -%}
   {%- set vidx = {} -%}
-  {%- for name in views.columns | map(attribute='name') -%}{%- do vidx.update({name | lower: loop.index0}) -%}{%- endfor -%}
-  {%- for row in views.rows -%}
+  {%- for name in views.table.columns | map(attribute='name') -%}{%- do vidx.update({name | lower: loop.index0}) -%}{%- endfor -%}
+  {%- for row in views.table.rows -%}
     {%- if (row[vidx['name']] | upper) == (relation.identifier | upper) -%}
-      {{ return({'found': true, 'kind': 'view', 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false}) }}
+      {{ return({'found': true, 'kind': 'view', 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false, 'error': none}) }}
     {%- endif -%}
   {%- endfor -%}
-  {{ return({'found': false, 'kind': none, 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false}) }}
+  {{ return({'found': false, 'kind': none, 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false, 'error': none}) }}
 {% endmacro %}
 
+{# Creates the ledger tables if missing and adds sql_hash to a 0.0.1 ledger. Returns none, or the error that stopped it. #}
 {% macro fingerprint_ledger_ddl(node_rel, seg_rel) %}
-  {%- do run_query("
+  {%- set node_ddl = "
     create table if not exists " ~ node_rel ~ " (
       deploy_id         varchar,
       node_id           varchar,
@@ -384,12 +448,8 @@
       post_shape        varchar,
       checksum          varchar,
       sql_hash          varchar
-    )") -%}
-  {# A 0.0.1 ledger predates sql_hash. SHOW is metadata-only, so the steady state issues no DDL against a shared ledger. #}
-  {%- if run_query("show columns like 'SQL_HASH' in table " ~ node_rel).rows | length == 0 -%}
-    {%- do run_query("alter table " ~ node_rel ~ " add column if not exists sql_hash varchar") -%}
-  {%- endif -%}
-  {%- do run_query("
+    )" -%}
+  {%- set seg_ddl = "
     create table if not exists " ~ seg_rel ~ " (
       deploy_id   varchar,
       node_id     varchar,
@@ -400,5 +460,17 @@
       post_hash   number,
       changed     boolean,
       hashed_at   timestamp_tz
-    )") -%}
+    )" -%}
+  {# A 0.0.1 ledger predates sql_hash. SHOW is metadata-only, so the steady state issues no DDL against a shared ledger. #}
+  {%- set has_hash = dbt_deja_vu.fingerprint_try_query("show columns like 'SQL_HASH' in table " ~ node_rel, before=[node_ddl, seg_ddl]) -%}
+  {%- if not has_hash.ok -%}
+    {{ return(has_hash.error) }}
+  {%- endif -%}
+  {%- if has_hash.table.rows | length == 0 -%}
+    {%- set added = dbt_deja_vu.fingerprint_try_query("alter table " ~ node_rel ~ " add column if not exists sql_hash varchar") -%}
+    {%- if not added.ok -%}
+      {{ return(added.error) }}
+    {%- endif -%}
+  {%- endif -%}
+  {{ return(none) }}
 {% endmacro %}

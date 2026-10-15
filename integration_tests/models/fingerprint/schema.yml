@@ -108,3 +108,11 @@ models:
     description: Guarded child of fp_sql_parent that renders fp_sql_status_expr; the runner rewrites that macro, which moves its compiled SQL but not its checksum.
   - name: fp_sql_child_of_var
     description: Guarded child of fp_sql_parent that renders the fp_sql_label var into its SQL.
+  - name: fp_fault_parent
+    description: Merge parent for the fault group (statements that fail inside the fingerprint); unchanged after the group's initial.
+  - name: fp_fault_child
+    description: Guarded child of fp_fault_parent, the fault group's control; skips whenever the ledger works, builds when the guard cannot read it.
+  - name: fp_fault_parked
+    description: Merge child of fp_fault_parent whose post-hook always hashes; with fp_fault_park_segment set its hooks take the segment ledger away, so its fingerprint fails and must read error.
+  - name: fp_fault_child_of_parked
+    description: Guarded child of fp_fault_parent and fp_fault_parked; builds on the error verdict, and when fp_fault_parked is built in a run that registered nothing.

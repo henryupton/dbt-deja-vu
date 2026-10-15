@@ -40,11 +40,26 @@
   a parent without its children, or built the node under other compiled SQL, deploy with
   `fingerprint_skip_unchanged_upstream` off.
 
+  A parent selected in this run with no registration in this deploy also builds the node: its
+  registration failed (or the command is not in fingerprint_commands), so its build in this run is
+  invisible to the ledger and nothing vouches for it.
+
   fingerprint_mark_skipped() appends the skip so the node's own children can read it. The skip row
   carries the node's compiled SQL hash too, since it is the baseline the node's next build reads.
 
+  No statement either macro issues can fail the node; each goes through fingerprint_try_query. A
+  guard query that fails logs a warning and answers false, so the node builds: an error never
+  becomes a skip. A skip that cannot be recorded logs a warning and leaves the skip in place; the
+  node's row for this deploy stays `pending`, so its children read a blocking verdict and build,
+  and its own next build compares against the last row it did record.
+
   These are plain macros for a materialization to call; nothing in this package calls them.
 #}
+
+{% macro fingerprint_guard_failed(node, step, error) %}
+  {%- do log("fingerprint: WARNING: " ~ node.name ~ " guard failed " ~ step ~ " (" ~ error ~ "); building", info=true) -%}
+  {{ return(false) }}
+{% endmacro %}
 
 {% macro fingerprint_should_skip(node=none) %}
   {%- if not execute or not dbt_deja_vu.fingerprint_enabled() or not dbt_deja_vu.fingerprint_skip_enabled() -%}
@@ -62,11 +77,15 @@
   {%- endif -%}
   {%- set parents = [] -%}
   {%- set unfingerprinted = [] -%}
+  {# Parents built in this run: each must be registered in this deploy, or its build is invisible to the ledger. #}
+  {%- set selected = dbt_deja_vu.fingerprint_selected_ids() -%}
+  {%- set selected_parents = [] -%}
   {%- for p in dbt_deja_vu.fingerprint_parent_ids(node) -%}
     {%- do parents.append(dbt_deja_vu.fingerprint_lit(p)) -%}
     {%- if dbt_deja_vu.fingerprint_materialization_excluded(graph.nodes.get(p) if graph is defined else none) -%}
       {%- do unfingerprinted.append(p) -%}
     {%- endif -%}
+    {%- if p in selected -%}{%- do selected_parents.append(dbt_deja_vu.fingerprint_lit(p)) -%}{%- endif -%}
   {%- endfor -%}
   {%- if parents | length == 0 -%}
     {{ return(false) }}
@@ -80,15 +99,25 @@
   {%- set node_rel = dbt_deja_vu.fingerprint_relation('deploy_node') -%}
   {%- set deploy_lit = dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_deploy_id()) -%}
   {%- set blocking_in = "('" ~ (dbt_deja_vu.fingerprint_blocking_verdicts() | map('string') | join("', '")) ~ "')" -%}
-  {%- set res = run_query(
+  {%- set latest = dbt_deja_vu.fingerprint_try_query(
       "with latest as (select node_id, verdict from " ~ node_rel
       ~ " where deploy_id = " ~ deploy_lit ~ " and node_id in (" ~ (parents | join(', ')) ~ ")"
       ~ dbt_deja_vu.fingerprint_latest_row() ~ ")"
-      ~ " select count_if(verdict in " ~ blocking_in ~ ") as blocking, count(*) as registered from latest").rows[0] -%}
+      ~ " select count_if(verdict in " ~ blocking_in ~ ") as blocking, count(*) as registered,"
+      ~ " count_if(node_id in (" ~ ((selected_parents | join(', ')) or 'null') ~ ")) as selected_registered from latest") -%}
+  {%- if not latest.ok -%}
+    {{ return(dbt_deja_vu.fingerprint_guard_failed(node, "reading its parents' verdicts", latest.error)) }}
+  {%- endif -%}
+  {%- set res = latest.table.rows[0] -%}
   {%- set blocking_count = res[0] | int -%}
   {%- set registered = res[1] | int -%}
+  {%- set unregistered = (selected_parents | length) - (res[2] | int) -%}
   {%- if registered == 0 or blocking_count > 0 -%}
     {%- do log("fingerprint: " ~ node.name ~ " parents registered=" ~ registered ~ " blocking=" ~ blocking_count ~ "; building", info=true) -%}
+    {{ return(false) }}
+  {%- endif -%}
+  {%- if unregistered > 0 -%}
+    {%- do log("fingerprint: " ~ node.name ~ " has " ~ unregistered ~ " parent(s) built in this run with no registration in this deploy; building", info=true) -%}
     {{ return(false) }}
   {%- endif -%}
 
@@ -100,12 +129,16 @@
   {%- set current = dbt_deja_vu.fingerprint_node_checksum(node) -%}
   {%- set node_lit = dbt_deja_vu.fingerprint_lit(node.unique_id) -%}
   {%- set rel_lit = dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_relation_name(node)) -%}
-  {%- set base = run_query(
+  {%- set baseline = dbt_deja_vu.fingerprint_try_query(
       "select checksum, deploy_id, to_char(finished_at, 'YYYY-MM-DD HH24:MI:SS.FF9 TZHTZM'),"
       ~ " to_char(registered_at, 'YYYY-MM-DD HH24:MI:SS.FF9 TZHTZM'), sql_hash from " ~ node_rel
       ~ " where node_id = " ~ node_lit ~ " and relation_name = " ~ rel_lit
       ~ " and verdict <> 'pending'"
       ~ " order by finished_at desc nulls last, registered_at desc limit 1") -%}
+  {%- if not baseline.ok -%}
+    {{ return(dbt_deja_vu.fingerprint_guard_failed(node, 'reading its last build', baseline.error)) }}
+  {%- endif -%}
+  {%- set base = baseline.table -%}
   {%- if base.rows | length == 0 -%}
     {%- do log("fingerprint: " ~ node.name ~ " has no fingerprinted build of this relation on record; building", info=true) -%}
     {{ return(false) }}
@@ -137,7 +170,7 @@
   #}
   {%- set since = dbt_deja_vu.fingerprint_ts_lit(base.rows[0][2]) -%}
   {%- set since_registered = dbt_deja_vu.fingerprint_ts_lit(base.rows[0][3]) -%}
-  {%- set later = run_query(
+  {%- set since_res = dbt_deja_vu.fingerprint_try_query(
       "select (select count(*) from " ~ node_rel
       ~ " where node_id = " ~ node_lit ~ " and relation_name = " ~ rel_lit
       ~ " and registered_at > " ~ since_registered
@@ -146,7 +179,11 @@
       ~ " where node_id in (" ~ (parents | join(', ')) ~ ") and coalesce(finished_at, registered_at) > " ~ since
       ~ dbt_deja_vu.fingerprint_latest_row() ~ ")"
       ~ " where (deploy_id <> " ~ deploy_lit ~ " and verdict in " ~ blocking_in ~ ")"
-      ~ " or (verdict not in ('pending', 'skipped') and snapshot_at < " ~ since ~ ")) as moved").rows[0] -%}
+      ~ " or (verdict not in ('pending', 'skipped') and snapshot_at < " ~ since ~ ")) as moved") -%}
+  {%- if not since_res.ok -%}
+    {{ return(dbt_deja_vu.fingerprint_guard_failed(node, 'reading the ledger since its last build', since_res.error)) }}
+  {%- endif -%}
+  {%- set later = since_res.table.rows[0] -%}
   {%- if later[0] | int > 0 -%}
     {%- do log("fingerprint: " ~ node.name ~ " was registered under another checksum since its last build and recorded no verdict; building", info=true) -%}
     {{ return(false) }}
@@ -169,13 +206,18 @@
   {%- endif -%}
   {%- set node = node if node is not none else model -%}
   {%- set node_rel = dbt_deja_vu.fingerprint_relation('deploy_node') -%}
-  {%- set key = " where deploy_id = " ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_deploy_id())
+  {%- set deploy_id = dbt_deja_vu.fingerprint_deploy_id() -%}
+  {%- set key = " where deploy_id = " ~ dbt_deja_vu.fingerprint_lit(deploy_id)
       ~ " and node_id = " ~ dbt_deja_vu.fingerprint_lit(node.unique_id) -%}
-  {%- do run_query(
+  {%- set res = dbt_deja_vu.fingerprint_try_query(
       "insert into " ~ node_rel
       ~ " (deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column, verdict, detail, registered_at, finished_at, pre_shape, checksum, sql_hash)"
       ~ " select deploy_id, node_id, node_name, relation_name, parents, snapshot_at, loaded_at_column,"
       ~ " 'skipped', " ~ dbt_deja_vu.fingerprint_lit(detail) ~ ", registered_at, current_timestamp(), pre_shape, checksum, "
       ~ dbt_deja_vu.fingerprint_lit(dbt_deja_vu.fingerprint_sql_hash(node))
       ~ " from " ~ node_rel ~ key ~ " and verdict = 'pending'") -%}
+  {%- if not res.ok -%}
+    {%- do log("fingerprint: WARNING: " ~ node.name ~ " was skipped but the skip could not be recorded (" ~ res.error
+        ~ "); its row in deploy " ~ deploy_id ~ " stays pending, so its children build", info=true) -%}
+  {%- endif -%}
 {% endmacro %}

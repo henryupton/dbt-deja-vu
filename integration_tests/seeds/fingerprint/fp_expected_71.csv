@@ -1,0 +1,5 @@
+node_name,verdict
+fp_fault_parent,unchanged
+fp_fault_child,skipped
+fp_fault_parked,unchanged
+fp_fault_child_of_parked,skipped

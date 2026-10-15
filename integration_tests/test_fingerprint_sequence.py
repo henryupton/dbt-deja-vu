@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 69 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 74 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
 run in order; --only / --from re-run a slice against whatever state the tables are in. fp_ledger
-and the three singular tests are enabled only with the fingerprint var on, which the runner sets on
+and the singular tests are enabled only with the fingerprint var on, which the runner sets on
 every step except scenario 50's first (built with the fingerprint off on purpose).
 
 The suite is weighted towards false negatives: every way a genuine change could be waved
@@ -35,6 +35,11 @@ the opt-in. Scenario 63 registers one row per statement across two steps of one 
 Scenarios 64 onwards are the compiled-SQL check: a rewritten macro (66) and a var (67) move a
 guarded child's compiled SQL with its checksum equal, and it builds; a hashless 0.0.1 ledger row
 as the latest build never lets a child skip (68); with nothing changed every child skips (65, 69).
+Scenarios 70 onwards are faults inside the fingerprint, which must never fail a node or become a skip:
+a ledger schema the role cannot create in (71), the segment ledger renamed away while a post-hook
+hashes (72), and a parent built in a run that registered nothing (73). Nothing is recorded when the
+ledger is unreachable, so a step may also assert on its output: expect_log patterns must appear,
+forbid_log patterns must not.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -47,6 +52,7 @@ import argparse
 import atexit
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +65,8 @@ EDP = "tag:fp_edp"
 EDGE = "tag:fp_edge"
 KNOB = "tag:fp_knob"
 SQL = "tag:fp_sql"
+FAULT = "tag:fp_fault"
+FAULT_FIXTURES = "fp_fault_parent fp_fault_child fp_fault_parked fp_fault_child_of_parked"
 
 # Files the runner rewrites mid-sequence: seeds so a reload carries changed content, one guarded model so
 # its checksum moves while its parents stay put, and one macro a guarded model renders so its compiled SQL
@@ -152,6 +160,13 @@ KNOB_62 = {**KNOB_VARS, "fp_knob_scd_source": "versioned"}
 
 # The compiled-SQL group: the var change of 67 carries into the scenarios after it, as the macro variant of 66 does.
 SQL_67 = {**STEADY, "fp_sql_label": "changed"}
+
+# The fault group: a ledger the role cannot create, and log lines that show each failure was contained. Nothing is
+# recorded when the ledger is unreachable, so the step's output is the evidence that the guards built.
+UNREACHABLE = {**STEADY, "fingerprint_schema": "INFORMATION_SCHEMA"}
+GUARD_FAILED = r"fingerprint: WARNING: {} guard failed reading its parents' verdicts \(2003: "
+NO_VERDICT = r"fingerprint: WARNING: \S+\.{} recorded no verdict for deploy "
+NO_SKIP = r"guarded_table: skipping"
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -325,6 +340,42 @@ SCENARIOS = [
          select=SQL, vars={**SQL_67, "fp_sql_legacy_child": "fp_sql_child"}, files={SQL_MACRO: "changed"}),
     dict(id=69, desc="sql: every change is now behind a recorded hash; every guarded child skips again", select=SQL,
          vars=SQL_67, files={SQL_MACRO: "changed"}),
+    # --- faults: statements that fail inside the fingerprint must never fail the node or skip a build ----------
+    dict(id=70, desc="fault: initial, create or replace everywhere", select=FAULT, flags=["--full-refresh"],
+         vars=STEADY),
+    # INFORMATION_SCHEMA takes no table, so registration fails at its first statement, and every post-hook and guard
+    # then reads a ledger that is not there. The second step, on the real ledger, is the recovery.
+    dict(id=71, desc="fault: a ledger schema the role cannot create in; nothing registers, every node builds and "
+                     "succeeds, every guard builds; the next step skips as before", steps=[
+        dict(select=FAULT_FIXTURES, vars=UNREACHABLE,
+             expect_log=[r"fingerprint: WARNING: registration for deploy \S+ failed creating the ledger in "
+                         r"DEV_ANALYTICS\.INFORMATION_SCHEMA \(3001: ",
+                         GUARD_FAILED.format("fp_fault_child"), GUARD_FAILED.format("fp_fault_child_of_parked"),
+                         *(NO_VERDICT.format(n) for n in FAULT_FIXTURES.split())],
+             forbid_log=[NO_SKIP]),
+        dict(select=FAULT, vars=STEADY),
+    ]),
+    # fp_fault_parked's hooks rename the segment table away and back around its fingerprint post-hook.
+    dict(id=72, desc="fault: the segment ledger goes missing as a post-hook hashes; that node records error with the "
+                     "message, and its guarded child builds", select=FAULT,
+         vars={**STEADY, "fp_fault_park_segment": True},
+         expect_log=[r"fp_fault_parked => error \(fingerprint query failed \(month hashes\): 2003: "]),
+    # A run whose registration wrote nothing (here a command left off fingerprint_commands, the state a contained
+    # registration failure leaves) builds a parent the ledger cannot see; its guarded child in that run must build,
+    # though its other parent is registered and unchanged.
+    dict(id=73, desc="fault: a parent built in a run that registered nothing builds its guarded child in that run",
+         steps=[
+             dict(select="fp_fault_parent", vars=STEADY),
+             dict(command="run", select="fp_fault_parked fp_fault_child_of_parked",
+                  vars={**STEADY, "fingerprint_commands": ["build"]},
+                  expect_log=[r"fingerprint: run is not in fingerprint_commands; nothing registered",
+                              r"fingerprint: fp_fault_child_of_parked has 1 parent\(s\) built in this run with no "
+                              r"registration in this deploy; building"],
+                  forbid_log=[NO_SKIP]),
+             dict(select="fp_ledger", vars=STEADY),
+         ]),
+    dict(id=74, desc="fault: nothing changed; the segment ledger is back and every guarded child skips", select=FAULT,
+         vars=STEADY),
 ]
 
 
@@ -399,7 +450,8 @@ def main() -> int:
             (here / path).write_text(FILE_VARIANTS[path][variant])
             print(f"[fingerprint] wrote {path} variant {variant!r}", flush=True)
 
-        steps = sc.get("steps") or [dict(select=sc["select"], flags=sc.get("flags", []), vars=sc.get("vars", {}))]
+        steps = sc.get("steps") or [dict(select=sc["select"], flags=sc.get("flags", []), vars=sc.get("vars", {}),
+                                         expect_log=sc.get("expect_log", []), forbid_log=sc.get("forbid_log", []))]
         ok = True
         last_vars = None
         for step in steps:
@@ -416,9 +468,22 @@ def main() -> int:
             last_vars = step_vars
             cmd = [args.dbt, step.get("command", "build"), "--select", *step["select"].split(),
                    "--vars", json.dumps(step_vars), *step.get("flags", []), *common]
-            failed = run(cmd).returncode != 0
+            proc = run(cmd, capture=True)
+            output = (proc.stdout or "") + (proc.stderr or "")
+            print(output, end="", flush=True)
+            failed = proc.returncode != 0
             if failed != bool(step.get("expect_fail")):
                 print(f"[fingerprint] step {'succeeded but was expected to fail' if not failed else 'failed'}", flush=True)
+                ok = False
+                break
+            # Log assertions, for outcomes the ledger cannot hold (a guard that built while the ledger was unreachable).
+            missing = [p for p in step.get("expect_log", []) if not re.search(p, output)]
+            present = [p for p in step.get("forbid_log", []) if re.search(p, output)]
+            for p in missing:
+                print(f"[fingerprint] step output has no line matching {p!r}", flush=True)
+            for p in present:
+                print(f"[fingerprint] step output has a forbidden line matching {p!r}", flush=True)
+            if missing or present:
                 ok = False
                 break
 

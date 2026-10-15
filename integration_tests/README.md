@@ -70,7 +70,7 @@ The `fp_edge` group (scenarios 39 to 57) holds the guard's remaining branches an
 Three singular tests ride along with every group: `fp_one_pending_per_node` (registration stays idempotent
 across the steps and retries of one deploy), `fp_skipped_left_alone` (no row of a skipped node's table
 was committed at or after the deploy's snapshot) and `fp_register_batched` (no register statement wrote more
-than `fingerprint_register_batch_size` rows; one statement stamps all its rows with one `registered_at`). Scenarios 52 and 53 fail a parent on purpose: the
+than `fingerprint_register_batch_size` rows; one statement stamps all its rows with one `registered_at`). The fault group adds a fourth, `fp_fault_error_recorded`. Scenarios 52 and 53 fail a parent on purpose: the
 children then build on its `pending` verdict, and a retry under the same deploy id settles it against the
 original snapshot. Scenarios 54 and 55 decide `fp_edge_child_multi` twice in one deploy:
 
@@ -123,6 +123,29 @@ checksum:
 - **68** - a hashless row planted as the control's latest build: the control builds.
 - **69** - nothing changed again: every child skips on the hashes recorded since.
 
+The `fp_fault` group (scenarios 70 onwards) holds statements that fail inside the fingerprint, which must never fail
+a node or turn into a skip. The faults are real Snowflake errors, induced without any switch in the package:
+
+- **`fp_fault_parent`** and **`fp_fault_child`** - a merge parent that stays unchanged after the group's initial,
+  and its guarded child, the control that skips whenever the ledger works.
+- **`fp_fault_parked`** - a merge child of `fp_fault_parent`, so its post-hook always hashes. With
+  `fp_fault_park_segment` set, its pre-hook renames the segment ledger table away and its own post-hook, which
+  runs after `fingerprint_post`, renames it back (`macros/fp_fault_park_segment.sql`).
+- **`fp_fault_child_of_parked`** - a guarded child of both.
+- **71** - `fingerprint_schema` is `INFORMATION_SCHEMA`, where no role can create a table: registration fails at
+  its first statement, and every post-hook and guard then reads a ledger that is not there. Every node builds and
+  succeeds; the next step, on the real ledger, skips as before.
+- **72** - the segment table goes missing while `fp_fault_parked`'s post-hook hashes: it records `error` with the
+  step and Snowflake's message (`fp_fault_error_recorded` checks the detail), and its guarded child builds.
+- **73** - a run whose registration wrote nothing (a `dbt run` left off `fingerprint_commands`, the state a
+  contained registration failure leaves) rebuilds `fp_fault_parked`; its guarded child builds in that run, though
+  its other parent is registered and unchanged.
+- **74** - nothing changed: the segment table is back and every guarded child skips.
+
+When the ledger is unreachable nothing is recorded, so a step can also assert on its own output: `expect_log` lists
+patterns that must appear (the warnings, the guard's reason for building) and `forbid_log` patterns that must not
+(`guarded_table: skipping`).
+
 The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), steered by vars:
 `fp_source` picks a seed (a fixture may pass its own), `fp_upper_email` / `fp_null_email_customer` change values below the
 watermark, `fp_extra_column` / `fp_drop_column` change the shape, `fp_duplicate_rows`,
@@ -135,7 +158,7 @@ dbt deps
 ```
 
 ```bash
-# Sixty-nine ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Seventy-four ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must
