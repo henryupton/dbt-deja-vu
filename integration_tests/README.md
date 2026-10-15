@@ -173,6 +173,17 @@ The scenarios:
 - **85** - the same within one deploy: step A's unsettled registration builds the child in step B.
 - **86** - nothing changed: the child skips.
 
+The `fp_mask` group (scenarios 87 to 90) holds a run-start audit stamp rendered into compiled SQL:
+
+- **`fp_mask_parent`** - a merge parent that stays unchanged after the group's initial.
+- **`fp_mask_child_of_stamp`** - a guarded child that renders `run_started_at` as a `_batched_at` stamp, the shape of
+  an audit-columns macro.
+- **`fp_mask_child_of_clock`** - a guarded child that renders it in the same format in a filter.
+- **88** - unmasked, both children build: their compiled SQL moves with the run start.
+- **89** - `fingerprint_sql_mask_run_started_at` names the stamp's template: the stamped child still builds once,
+  against a baseline hashed unmasked.
+- **90** - masked again: the stamped child skips; the child reading the clock in logic builds.
+
 When the ledger is unreachable nothing is recorded, so a step can also assert on its own output: `expect_log` lists
 patterns that must appear (the warnings, the guard's reason for building) and `forbid_log` patterns that must not
 (`guarded_table: skipping`).
@@ -189,7 +200,7 @@ dbt deps
 ```
 
 ```bash
-# Eighty-six ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Ninety ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must

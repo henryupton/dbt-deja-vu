@@ -28,6 +28,11 @@
                                                  nothing fingerprinted it.
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every
                                                  node carrying the tag is registered, default none.
+    fingerprint_sql_mask_run_started_at (list): strftime templates whose run_started_at rendering is masked out of
+                                                 the compiled SQL hash, default []. For an audit stamp such as
+                                                 "'%Y-%m-%dT%H:%M:%S.%fZ'::timestamp_tz as _batched_at", which would
+                                                 otherwise build its model every run; name the alias so a clock read
+                                                 in logic is never masked.
     fingerprint_contain_register_failure (bool): default false, so a registration failure stops the run before any
                                                  node builds. On, it logs a warning and the run builds where the
                                                  ledger cannot see it, so a later run can skip a child of anything
@@ -299,9 +304,10 @@
 
 {#
   md5 of the node's compiled SQL, the text its materialization runs: every macro it calls, var it renders and
-  ephemeral it reads, rendered. None when the node carries no compiled SQL (graph nodes on Fusion do not; the model
-  in a materialization or hook context does, the same text as `sql`). Hashed in Jinja, so arbitrary SQL text never
-  has to survive a Snowflake string literal. The guard compares it with the hash at the node's last build.
+  ephemeral it reads, rendered, with any fingerprint_sql_mask_run_started_at rendering masked. None when the node
+  carries no compiled SQL (graph nodes on Fusion do not; the model in a materialization or hook context does, the
+  same text as `sql`). Hashed in Jinja, so arbitrary SQL text never has to survive a Snowflake string literal. The
+  guard compares it with the hash at the node's last build.
 #}
 {% macro fingerprint_sql_hash(node) %}
   {%- if node is none or local_md5 is not defined -%}
@@ -312,7 +318,26 @@
   {%- if code is none or (code | string | trim) == '' -%}
     {{ return(none) }}
   {%- endif -%}
-  {{ return(local_md5(code | string)) }}
+  {{ return(local_md5(dbt_deja_vu.fingerprint_sql_masked(code | string))) }}
+{% endmacro %}
+
+{#
+  The compiled SQL with each rendering of a fingerprint_sql_mask_run_started_at template replaced by the template
+  itself: run_started_at.strftime(template) is what an audit-columns macro renders, so the text that moves with the
+  run start drops out of the hash and nothing else does. Name the stamp's alias in the template, or a clock read
+  in logic rendered in the same format is masked too and its model can skip on stale output.
+#}
+{% macro fingerprint_sql_masked(code) %}
+  {%- set templates = var('fingerprint_sql_mask_run_started_at', []) or [] -%}
+  {%- if templates is string -%}{%- set templates = [templates] -%}{%- endif -%}
+  {%- if templates | length == 0 or run_started_at is not defined or run_started_at is none -%}
+    {{ return(code) }}
+  {%- endif -%}
+  {%- set masked = {'sql': code} -%}
+  {%- for t in templates -%}
+    {%- do masked.update({'sql': masked.sql | replace(run_started_at.strftime(t | string), t | string)}) -%}
+  {%- endfor -%}
+  {{ return(masked.sql) }}
 {% endmacro %}
 
 {#

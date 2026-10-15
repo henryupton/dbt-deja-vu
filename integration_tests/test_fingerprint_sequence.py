@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 86 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 90 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -46,6 +46,8 @@ node's fingerprint post-hook): the registration that run never settled keeps blo
 earlier step's verdict outranks pending. A parent's builds its child in that run (79) and in a later
 deploy (81); a guarded child's own builds it at its next selection, with its SQL back as it was, in
 another deploy (84) or a later step of its own (85).
+Scenarios 87 to 90 mask a run-start audit stamp out of the compiled SQL hash: the stamped child skips
+once masked, the child reading the clock in logic still builds.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -190,6 +192,10 @@ UNSETTLED_PARENT = (r"fingerprint: fp_settle_child has 1 parent registration\(s\
 UNSETTLED_SELF = (r"fingerprint: fp_settle_child was registered since its last build by 1 run\(s\) that recorded no "
                   r"verdict or skip for it; building")
 SETTLE_LABEL = {**STEADY, "fp_settle_label": "changed"}
+
+# The mask group: a run-start audit stamp rendered into compiled SQL, masked by the template that renders it.
+MASK = "tag:fp_mask"
+MASKED = {**STEADY, "fingerprint_sql_mask_run_started_at": ["'%Y-%m-%dT%H:%M:%S.%fZ'::timestamp_tz as _batched_at"]}
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -442,6 +448,15 @@ SCENARIOS = [
                   expect_log=[UNSETTLED_SELF], forbid_log=[NO_SKIP]),
          ]),
     dict(id=86, desc="settle: nothing changed; the child skips again", select=SETTLE, vars=STEADY),
+    # --- mask: a run-start stamp in the compiled SQL, the shape of an audit column -------------------------------
+    dict(id=87, desc="mask: initial, create or replace everywhere", select=MASK, flags=["--full-refresh"], vars=STEADY),
+    dict(id=88, desc="mask: unmasked, both children's compiled SQL moves with the run start, so both build",
+         select=MASK, vars=STEADY),
+    # The baseline hash was taken unmasked, so the first masked run still builds the stamped child once.
+    dict(id=89, desc="mask: masked for the first time; the stamped child builds once against its unmasked baseline",
+         select=MASK, vars=MASKED),
+    dict(id=90, desc="mask: masked again; the stamped child skips, the child reading the clock in logic still builds",
+         select=MASK, vars=MASKED),
 ]
 
 

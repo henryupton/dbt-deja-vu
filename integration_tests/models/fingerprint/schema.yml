@@ -120,3 +120,9 @@ models:
     description: Merge parent for the settle group (a registration a run never settles); fp_settle_flip lowers a status, and with fp_settle_lose naming it its verdict is lost.
   - name: fp_settle_child
     description: Guarded child of fp_settle_parent that renders fp_settle_label; builds on a parent registration that recorded nothing, and with fp_settle_lose naming it its own verdict is lost.
+  - name: fp_mask_parent
+    description: Merge parent for the mask group (fingerprint_sql_mask_run_started_at); unchanged after the group's initial.
+  - name: fp_mask_child_of_stamp
+    description: Guarded child of fp_mask_parent that renders the run start as a _batched_at audit stamp; skips only while the mask hides that stamp from its compiled SQL hash.
+  - name: fp_mask_child_of_clock
+    description: Guarded child of fp_mask_parent that renders the run start in the same format but in a filter; the mask's template names the stamp's alias, so this always builds.
