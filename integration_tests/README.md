@@ -237,7 +237,8 @@ day of Time Travel, which every table inherits.
 Each arm's verdicts are asserted against `fp_expected_<n>_control.csv` and `fp_expected_<n>_treatment.csv`, every
 registered node listed, `skipped` meaning pruned. A third step then tests `fp_prune_arms_agree`
 (`tests/fingerprint_prune/`, enabled only by `fp_prune_oracle`) under the treatment's vars, even when the treatment's
-build failed, so neither check hides the other. It is a content oracle that does not use the package's hash:
+build failed, so neither check hides the other. The step must log the test's pass: a test that is disabled or selects
+nothing exits 0. It is a content oracle that does not use the package's hash:
 `count(*)` and `hash_agg` of every fixture, `_batched_at` and `_written_at` left out, must match across the arms. Scenario 97 declares its
 staleness (`stale` in the runner): for each relation named, the treatment must equal its own content at the deploy's
 snapshot, and the control that content plus exactly the named number of rows, every one above the treatment's
