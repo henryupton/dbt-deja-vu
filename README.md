@@ -79,6 +79,8 @@ Two blind spots. Config that changes how the materialization writes without chan
 {% endif %}
 ```
 
+[Pruning scenarios](integration_tests/README.md#pruning-scenarios) shows these rules end to end: a warehouse line built twice per deploy from the same inputs, with the guard off and on, and a matrix of which nodes each rule prunes or builds, asserted by the suite against the guard's verdicts and an independent content check.
+
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `fingerprint` | `false` | Master switch; every macro is a no-op without it |

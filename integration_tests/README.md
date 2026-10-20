@@ -5,7 +5,8 @@ schema, and asserts the verdict every fixture records.
 
 ## Fixtures
 
-`models/fingerprint/`, `models/fingerprint_unprotected/`, `models/fingerprint_norowts/` and `models/fingerprint_ledger/`.
+`models/fingerprint/`, `models/fingerprint_unprotected/`, `models/fingerprint_norowts/` and `models/fingerprint_ledger/`;
+the pruning group's are in `models/fingerprint_prune/` and `models/fingerprint_prune_input/` (see Pruning scenarios).
 
 Fixtures for the content fingerprint macros (`macros/` in the package). Every
 materialization shape the fingerprint has to read is here: dbt-scd2-utils' `scd` types 1 and 2 (a test-only dependency), dbt
@@ -39,8 +40,8 @@ The guard also refuses to skip a node whose own source checksum, or whose compil
 from its last fingerprinted build of the same relation. Fixture model SQL is steered by vars, not edits,
 and no guarded fixture renders a var that moves, so guarded checksums and hashes never move between
 scenarios except where a scenario means them to: the runner rewrites two seed CSVs, one guarded model
-(`fp_edge_child_multi`, in scenarios 46 and 54) and one macro a guarded model renders (`fp_sql_expr`, from
-scenario 66) and restores them when it exits; a variant a killed run left behind is recognised at start
+(`fp_edge_child_multi`, in scenarios 46 and 54) and two macros a guarded model renders (`fp_sql_expr`, from
+scenario 66, and `fp_prune_as_of_join`, from 93) and restores them when it exits; a variant a killed run left behind is recognised at start
 and the committed copy restored from git. Every group's first scenario builds each guarded child, so the
 expected verdicts hold from the first run on a fresh schema and on every rerun.
 
@@ -194,6 +195,103 @@ The source rows come from `fp_customer_rows()` (`macros/fp_fixture_sql.sql`), st
 watermark, `fp_extra_column` / `fp_drop_column` change the shape, `fp_duplicate_rows`,
 `fp_bump_loaded_at` and `fp_shuffle` exercise the hash.
 
+## Pruning scenarios
+
+The `fp_prune` group (scenarios 91 to 99) shows end to end which nodes the guard prunes, and why, on fixtures shaped
+like the EDP trial line (support-agent adherence). Every node is `fp_prune_<name>`:
+
+```
+stg_reports (frozen) -> evt_report (incremental, delete+insert) -> int_adh --\
+stg_agent_lifecycle (frozen) -> dim_agent (scd 2) ---------------------------+-> fct_daily (as-of join) -> dm_fct
+                                dim_agent -> dm_dim_agent (copies the validity columns)
+                                dim_agent -> dim_agent_current (view, _is_current) -> rpt
+stg_country_lifecycle (frozen) -> dim_country (scd 2) -> dm_country -> dashboard (hookless, excluded)
+                                  dim_country -> striking (reads current_date(), fingerprint_skip false)
+```
+
+- Every guarded node is built by the test-only `guarded_overwrite` (`macros/guarded_overwrite.sql`), EDP's
+  `truncate_insert` with the guard in it. It keeps the object under `--full-refresh` (insert overwrite by column name,
+  shared with `overwrite_table`) and replaces it only when it is missing, is not a table, or `force_full_refresh` is
+  set. The guard sits after that decision and before the pre-hooks.
+- The scd dims (dbt-scd2-utils) and the built-in incremental event have no guard, so they always build; their verdicts
+  are what the guarded nodes read.
+- `fct_daily` is the only model that renders `fp_prune_as_of_join` (`macros/fp_prune_as_of_join.sql`), so rewriting it
+  is a macro-only change.
+- Every fixture renders EDP's audit columns (`fp_prune_audit_columns()` in `macros/fp_prune.sql`: a `_batched_at`
+  run-start literal and a `_written_at` write clock), and the group sets `fingerprint_sql_mask_run_started_at` to the
+  stamp's template. Scenario 99 drops the mask.
+- The frozen inputs (`models/fingerprint_prune_input/`) are tables in a shared schema that no deploy selects. The runner
+  rebuilds them with the fingerprint off whenever a scenario's `stage` differs from the last, from seeds under
+  `seeds/fingerprint_prune/` whose rows land by stage.
+
+Each scenario (`arms=True` in the runner) builds its selection twice from the same inputs, each as its own deploy:
+
+- **control** - guard off, in `<target schema>_prune_control`, with its ledger there.
+- **treatment** - guard on (off in 91 and 98), in `<target schema>_prune_treatment`, with its own ledger.
+
+The ledgers have to be separate: the guard reads every deploy's rows for a parent's node id, and both arms share node
+ids, so one ledger would let the control's verdicts block the treatment's skips. `macros/fp_prune.sql` routes the
+arm models by the `fp_prune_arm` var (`generate_schema_name`), and `fp_prune_setup` creates the three schemas with one
+day of Time Travel, which every table inherits.
+
+Each arm's verdicts are asserted against `fp_expected_<n>_control.csv` and `fp_expected_<n>_treatment.csv`, every
+registered node listed, `skipped` meaning pruned. A third step then tests `fp_prune_arms_agree`
+(`tests/fingerprint_prune/`, enabled only by `fp_prune_oracle`) under the treatment's vars, even when the treatment's
+build failed, so neither check hides the other. It is a content oracle that does not use the package's hash:
+`count(*)` and `hash_agg` of every fixture, `_batched_at` and `_written_at` left out, must match across the arms. Scenario 97 declares its
+staleness (`stale` in the runner): for each relation named, the treatment must equal its own content at the deploy's
+snapshot, and the control that content plus exactly the named number of rows, every one above the treatment's
+watermark.
+
+The matrix is the treatment arm, generated from those seeds by `./test_fingerprint_sequence.py --write-matrix`
+(`--check-matrix` fails when it is out of date). A pruned cell gives the verdict the control's build recorded.
+
+<!-- fp_prune matrix: generated by ./test_fingerprint_sequence.py --write-matrix; do not edit by hand -->
+| Node | 91 S1 baseline (guard off) | 92 S2 no-op | 93 S3 macro only | 94 S4 backdated version | 95 S5 forward-dated version | 96 S6 daily (no --full-refresh) | 97 S7 appended | 98 S8 resync (guard off) | 99 mask off |
+|---|---|---|---|---|---|---|---|---|---|
+| `fp_prune_evt_report` | built: new | built: new | built: new | built: new | built: new | built: unchanged | built: new | built: new | built: new |
+| `fp_prune_int_adh` | built: new | built: unchanged | built: unchanged | built: unchanged | built: unchanged | **pruned** (control: unchanged) | built: appended | built: unchanged | built: unchanged |
+| `fp_prune_dim_agent` | built: new | built: unchanged | built: unchanged | built: modified | built: modified | built: modified | built: appended | built: unchanged | built: unchanged |
+| `fp_prune_fct_daily` | built: new | **pruned** (control: unchanged) | built: unchanged | built: modified | built: unchanged | built: unchanged | **pruned** (control: appended; stale, 4 row(s) behind) | built: appended | built: unchanged |
+| `fp_prune_dm_fct` | built: new | **pruned** (control: unchanged) | **pruned** (control: unchanged) | built: modified | **pruned** (control: unchanged) | **pruned** (control: unchanged) | **pruned** (control: appended; stale, 4 row(s) behind) | built: appended | built: unchanged |
+| `fp_prune_dm_dim_agent` | built: new | **pruned** (control: unchanged) | **pruned** (control: unchanged) | built: modified | built: modified | built: modified | **pruned** (control: appended; stale, 1 row(s) behind) | built: appended | built: unchanged |
+| `fp_prune_dim_agent_current` | built: new | built: new | built: new | built: new | built: new | built: new | built: new | built: new | built: new |
+| `fp_prune_rpt` | built: new | built: unchanged | built: unchanged | built: unchanged | built: modified | built: modified | built: appended | built: unchanged | built: unchanged |
+| `fp_prune_dim_country` | built: new | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged |
+| `fp_prune_dm_country` | built: new | **pruned** (control: unchanged) | **pruned** (control: unchanged) | **pruned** (control: unchanged) | **pruned** (control: unchanged) | **pruned** (control: unchanged) | **pruned** (control: unchanged) | built: unchanged | built: unchanged |
+| `fp_prune_dashboard` | built, not registered | built, not registered | built, not registered | built, not registered | built, not registered | built, not registered | built, not registered | built, not registered | built, not registered |
+| `fp_prune_striking` | built: new | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged | built: unchanged |
+<!-- fp_prune matrix end -->
+
+What each column shows, and the rule that prunes or blocks:
+
+- **91 S1 baseline** - guard off in both arms and every object created or replaced (`force_full_refresh`, and the scd
+  `full_refresh_strategy` replace), so every node reads `new` and every guarded node has a baseline on record: its
+  checksum and its masked compiled SQL hash.
+- **92 S2 no-op** - a deploy that changes nothing, under `--full-refresh` as EDP deploys run. The built-in incremental
+  replaces the event (`new`), which blocks `int_adh`; it rebuilds `unchanged`. Every guarded node whose parents all
+  read `unchanged` prunes: `fct_daily`, `dm_fct`, `dm_dim_agent` and `dm_country`. `rpt` builds because its parent is
+  a view, which always reads `new`; `striking` because it opts out; the dashboard because it is never registered.
+- **93 S3 macro only** - the as-of macro is rewritten as the same predicate the other way round. `fct_daily`'s checksum
+  holds but its compiled SQL moves, so it builds; it reads `unchanged`, so `dm_fct` prunes behind it (early cutoff).
+- **94 S4 backdated version** - an agent version dated between two existing ones lands. The dim reads `modified` (an
+  old row's `_valid_to` moved), so `fct_daily` rebuilds and reads `modified` too (an old report now resolves to the new
+  version), as do `dm_fct` and `dm_dim_agent`. `rpt` rebuilds `unchanged`: no current version moved.
+- **95 S5 forward-dated version** - a version dated after every report closes a current row. The dim and
+  `dm_dim_agent` read `modified`; `fct_daily` rebuilds, but no report resolves differently, so it reads `unchanged`
+  and `dm_fct` prunes.
+- **96 S6 daily** - another forward-dated version, deployed without `--full-refresh`. The incremental event has nothing
+  new to write and reads `unchanged`, so `int_adh` prunes as well. `fct_daily` still builds: one blocking parent (the
+  dim) is enough, and a pruned one (`int_adh`) never blocks.
+- **97 S7 appended** - a new agent and a day of reports land. The dim and `int_adh` read `appended`, which never
+  blocks, so `fct_daily`, `dm_fct` and `dm_dim_agent` prune on content that lacks the new rows. That is the guard's
+  logic-only propagation: stale by design, declared to the oracle as 4, 4 and 1 rows behind.
+- **98 S8 resync** - the treatment rebuilt with the guard off. The stale nodes read `appended`, and the oracle finds the
+  arms identical again.
+- **99 mask off** - the no-op deploy again without `fingerprint_sql_mask_run_started_at`. Every guarded node renders
+  the run-start stamp, so every compiled SQL hash moves and nothing prunes. It runs last because the unmasked hashes it
+  records would build every guarded node once more at the next masked deploy.
+
 ## Running
 
 ```bash
@@ -201,7 +299,7 @@ dbt deps
 ```
 
 ```bash
-# Ninety ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
+# Ninety-nine ordered, stateful scenarios; each builds a selection with fingerprint: true (bar
 # scenario 50's first step, built with it off on purpose, and scenario 59's, a compile) and
 # asserts every fixture's verdict (new / unchanged / appended / modified / unhashable / error /
 # skipped) against fp_expected_<n>. Weighted towards false negatives: genuine changes that must
@@ -212,8 +310,17 @@ dbt deps
 ./test_fingerprint_sequence.py --only 9,10,12 --show
 
 # Scenario 12 deletes fixture rows inside the build with a pre-hook (fp_delete_customer var).
+
+# The pruning group alone: each scenario rebuilds the frozen inputs if its stage moved, then builds
+# the control arm and the treatment arm
+./test_fingerprint_sequence.py --from 91
+
+# Regenerate the pruning matrix from the expected seeds, or fail when it is out of date (no dbt)
+./test_fingerprint_sequence.py --write-matrix
+./test_fingerprint_sequence.py --check-matrix
 ```
 
 Fixture tables and the seeds under `seeds/fingerprint` get `data_retention_time_in_days = 1` from a
 post-hook, because the fingerprint reads the pre-build table through Time Travel and a dev database may
-have retention 0.
+have retention 0. The pruning group's schemas get it from `fp_prune_setup`, which the runner calls first, so
+every table in them inherits it.
