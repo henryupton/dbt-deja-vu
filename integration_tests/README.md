@@ -242,6 +242,11 @@ ids, so one ledger would let the control's verdicts block the treatment's skips.
 arm models by the `fp_prune_arm` var (`generate_schema_name`), and `fp_prune_setup` creates the three schemas with one
 day of Time Travel, which every table inherits.
 
+That retention is a precondition of every pruned cell, not a fixture detail. At retention 0 every fingerprinted table
+reads `error`, which blocks, so nothing prunes and the guard looks broken. EDP's `ANALYTICS` schemas keep 28 days
+(transient tables cap at one, enough for a deploy), but its dev schemas inherit `DEV_ANALYTICS`' 0. A trial there
+needs `data_retention_time_in_days = 1` set on its schemas first, or has to run in prod-like schemas.
+
 Each arm's verdicts are asserted against `fp_expected_<n>_control.csv` and `fp_expected_<n>_treatment.csv`, every
 registered node listed, `skipped` meaning pruned. A third step then tests `fp_prune_arms_agree`
 (`tests/fingerprint_prune/`, enabled only by `fp_prune_oracle`) under the treatment's vars, even when the treatment's
