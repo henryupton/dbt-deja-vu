@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 90 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 99 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
 run in order; --only / --from re-run a slice against whatever state the tables are in. fp_ledger
 and the singular tests are enabled only with the fingerprint var on, which the runner sets on
-every step except scenario 50's first (built with the fingerprint off on purpose).
+every step except scenario 50's first (built with the fingerprint off on purpose) and the prune
+group's rebuilds of its frozen inputs, which no deploy sees.
 
 The suite is weighted towards false negatives: every way a genuine change could be waved
 through as unchanged or appended, and every way a guarded child could be skipped when it must
@@ -48,10 +49,19 @@ deploy (81); a guarded child's own builds it at its next selection, with its SQL
 another deploy (84) or a later step of its own (85).
 Scenarios 87 to 90 mask a run-start audit stamp out of the compiled SQL hash: the stamped child skips
 once masked, the child reading the clock in logic still builds.
+Scenarios 91 to 99 demonstrate pruning on the EDP trial line (models/fingerprint_prune). Each builds
+its selection twice from the same frozen inputs (models/fingerprint_prune_input, rebuilt between
+scenarios at the scenario's stage): a control arm with the guard off, then a treatment arm with it
+on, each its own deploy on its own schema and ledger (macros/fp_prune.sql), asserted against
+fp_expected_<n>_control and fp_expected_<n>_treatment. A third step then tests
+fp_prune_arms_agree, a content oracle independent of the package's hash: every fixture must match
+across the arms, bar the staleness scenario 97 declares. --write-matrix regenerates the matrix in
+README.md from those seeds, and --check-matrix fails when it is out of date; neither runs dbt.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
                                    [--only 1,2,3] [--from 15] [--show] [--no-seed]
+    ./test_fingerprint_sequence.py --write-matrix | --check-matrix
 """
 
 from __future__ import annotations
@@ -78,8 +88,8 @@ SETTLE = "tag:fp_settle"
 FAULT_FIXTURES = "fp_fault_parent fp_fault_child fp_fault_parked fp_fault_child_of_parked"
 
 # Files the runner rewrites mid-sequence: seeds so a reload carries changed content, one guarded model so
-# its checksum moves while its parents stay put, and one macro a guarded model renders so its compiled SQL
-# moves while its checksum stays put. A variant stays in place for the scenarios that follow;
+# its checksum moves while its parents stay put, and two macros guarded models render so their compiled SQL
+# moves while their checksums stay put. A variant stays in place for the scenarios that follow;
 # the committed originals are restored when the runner exits. A variant left behind by a killed run is
 # recognised at start and the committed copy is taken from git instead.
 SEED_LIVE = "seeds/fingerprint/fp_seed_live.csv"
@@ -112,6 +122,17 @@ SQL_MACRO_HEAD = (
     "{% macro fp_sql_status_expr(column) %}\n"
 )
 SQL_MACRO_TAIL = "{% endmacro %}\n"
+# The as-of join only fp_prune_fct_daily renders: the variant writes the same predicate the other way round, so the
+# fact's compiled SQL moves while its output and its checksum stay put.
+PRUNE_AS_OF = "macros/fp_prune_as_of_join.sql"
+PRUNE_AS_OF_HEAD = (
+    "{#\n"
+    "  Test-only: the as-of join predicate fp_prune_fct_daily renders, and the only model that does. The runner rewrites\n"
+    "  this file from scenario 93 with the same predicate written the other way round, so the fact's compiled SQL moves\n"
+    "  while its output and its own checksum stay put.\n"
+    "#}\n"
+    "{% macro fp_prune_as_of_join(fact_date, dim) %}\n"
+)
 FILE_VARIANTS = {
     SEED_LIVE: {
         # customer 3 flips INACTIVE -> ACTIVE with the same timestamps
@@ -148,6 +169,13 @@ FILE_VARIANTS = {
     SQL_MACRO: {
         # upper(status) becomes lower(status): every status value changes
         "changed": SQL_MACRO_HEAD + "  {{ return('lower(' ~ column ~ ')') }}\n" + SQL_MACRO_TAIL,
+    },
+    PRUNE_AS_OF: {
+        "changed": (
+            PRUNE_AS_OF_HEAD
+            + "  {{ return(dim ~ '._valid_from::date <= ' ~ fact_date ~ ' and ' ~ fact_date ~ ' < ' ~ dim ~ '._valid_to::date') }}\n"
+            + SQL_MACRO_TAIL
+        ),
     },
 }
 
@@ -197,6 +225,26 @@ SETTLE_LABEL = {**STEADY, "fp_settle_label": "changed"}
 # The mask group: a run-start audit stamp rendered into compiled SQL, masked by the template that renders it.
 MASK = "tag:fp_mask"
 MASKED = {**STEADY, "fingerprint_sql_mask_run_started_at": ["'%Y-%m-%dT%H:%M:%S.%fZ'::timestamp_tz as _batched_at"]}
+
+# The prune group: the EDP trial line (models/fingerprint_prune) built twice per scenario from the same frozen inputs
+# (models/fingerprint_prune_input, rebuilt between scenarios at the scenario's stage), a control arm with the guard
+# off and a treatment arm with it on, in their own schemas with their own ledgers. Every fixture renders the EDP audit
+# stamp, and the group masks its template. Then fp_prune_arms_agree, the content oracle, is tested.
+PRUNE = "tag:fp_prune"
+PRUNE_INPUT = "tag:fp_prune_input"
+PRUNE_ARMS = ("control", "treatment")
+PRUNE_VARS = {"fingerprint_sql_mask_run_started_at": MASKED["fingerprint_sql_mask_run_started_at"],
+              "fingerprint_exclude_materializations": ["hookless_table"]}
+PRUNE_UNMASKED = {k: v for k, v in PRUNE_VARS.items() if k != "fingerprint_sql_mask_run_started_at"}
+FULL_REFRESH = ["--full-refresh"]
+# Matrix rows, in lineage order. The excluded leaf is never registered, so no expected seed names it.
+PRUNE_NODES = ["fp_prune_evt_report", "fp_prune_int_adh", "fp_prune_dim_agent", "fp_prune_fct_daily", "fp_prune_dm_fct",
+               "fp_prune_dm_dim_agent", "fp_prune_dim_agent_current", "fp_prune_rpt", "fp_prune_dim_country",
+               "fp_prune_dm_country", "fp_prune_dashboard", "fp_prune_striking"]
+PRUNE_UNREGISTERED = {"fp_prune_dashboard"}
+PRUNE_SCHEMA_LINE = r"fp_prune: (input|control|treatment) schema (\S+)"
+MATRIX_START = "<!-- fp_prune matrix: generated by ./test_fingerprint_sequence.py --write-matrix; do not edit by hand -->"
+MATRIX_END = "<!-- fp_prune matrix end -->"
 
 SCENARIOS = [
     # --- core: initial load and the plain shapes ---------------------------------------------
@@ -458,6 +506,42 @@ SCENARIOS = [
          select=MASK, vars=MASKED),
     dict(id=90, desc="mask: masked again; the stamped child skips, the child reading the clock in logic still builds",
          select=MASK, vars=MASKED),
+    # --- prune: the EDP trial line, built by a control arm (guard off) and a treatment arm (guard on) ------------------
+    # arms=True runs the selection once per arm; stage is the frozen inputs' state, guard=False keeps the treatment's
+    # guard off too, and stale names the relations the treatment leaves behind on purpose (relation: rows behind).
+    dict(id=91, label="S1 baseline (guard off)", desc="prune: baseline with the guard off in both arms; every object "
+                                                     "created or replaced", arms=True, guard=False, stage=0,
+         select=PRUNE, flags=FULL_REFRESH,
+         vars={**PRUNE_VARS, "force_full_refresh": True, "fp_full_refresh_strategy": "replace"}),
+    dict(id=92, label="S2 no-op", desc="prune: a no-op deploy; the replaced event builds its child, every other guarded "
+                                       "node with unchanged parents prunes", arms=True, stage=0, select=PRUNE,
+         flags=FULL_REFRESH, vars=PRUNE_VARS),
+    dict(id=93, label="S3 macro only", desc="prune: the as-of macro is rewritten; the fact builds on its compiled SQL, "
+                                            "reads unchanged, and its mart prunes", arms=True, stage=0, select=PRUNE,
+         flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    # The macro variant is named again from here on, so each scenario states the file it expects.
+    dict(id=94, label="S4 backdated version", desc="prune: a backdated agent version re-resolves an old report; the change "
+                                                   "propagates to the marts", arms=True, stage=4, select=PRUNE,
+         flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    dict(id=95, label="S5 forward-dated version", desc="prune: a forward-dated version closes a row; the fact rebuilds "
+                                                       "unchanged and its mart prunes (early cutoff)", arms=True, stage=5,
+         select=PRUNE, flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    dict(id=96, label="S6 daily (no --full-refresh)", desc="prune: the same without --full-refresh; the incremental event "
+                                                           "writes nothing, so the intermediate prunes too", arms=True,
+         stage=6, select=PRUNE, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    # Appended never blocks: the children of the appended dim and intermediate prune on content that lacks the new rows.
+    dict(id=97, label="S7 appended", desc="prune: rows appended to the dim and the intermediate; their children prune and "
+                                          "are stale by exactly those rows", arms=True, stage=7, select=PRUNE,
+         flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"},
+         stale={"fp_prune_fct_daily": 4, "fp_prune_dm_fct": 4, "fp_prune_dm_dim_agent": 1}),
+    dict(id=98, label="S8 resync (guard off)", desc="prune: the treatment rebuilt with the guard off; the arms are "
+                                                    "identical again", arms=True, guard=False, stage=7, select=PRUNE,
+         flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    # Every guarded fixture renders the run-start stamp, so without the mask none of them can prune. Last, because the
+    # unmasked hashes it records would build every guarded node once more at the next masked deploy.
+    dict(id=99, label="mask off", desc="prune: a no-op deploy without fingerprint_sql_mask_run_started_at; every guarded "
+                                       "node builds on its moved compiled SQL", arms=True, stage=7, select=PRUNE,
+         flags=FULL_REFRESH, vars=PRUNE_UNMASKED, files={PRUNE_AS_OF: "changed"}),
 ]
 
 
@@ -482,6 +566,83 @@ def _original_text(here: Path, path: str) -> str:
     return committed
 
 
+def prune_steps(sc: dict, run_tag: str, schemas: dict[str, str], frozen_stage: int | None) -> list[dict]:
+    """A prune scenario's steps: the frozen inputs rebuilt at its stage unless they are there already, one build per
+    arm, each its own deploy on its own schema and ledger, asserted against fp_expected_<id>_<arm>, then the content
+    oracle under the treatment's vars, which runs even when the treatment's build failed."""
+    sid = sc["id"]
+    steps = []
+    if frozen_stage != sc["stage"]:
+        steps.append(dict(select=PRUNE_INPUT, flags=FULL_REFRESH, freeze=sc["stage"],
+                          vars={"fingerprint": False, "fp_prune_stage": sc["stage"]}))
+    for arm in PRUNE_ARMS:
+        arm_vars = {**sc.get("vars", {}), "fp_prune_arm": arm, "fp_prune_stage": sc["stage"],
+                    "fingerprint_schema": schemas[arm], "deploy_id": f"fp_{run_tag}_{sid}_{arm}",
+                    "fp_iteration": f"{sid}_{arm}",
+                    "fingerprint_skip_unchanged_upstream": arm == "treatment" and sc.get("guard", True)}
+        steps.append(dict(select=sc["select"], flags=sc.get("flags", []), vars=arm_vars))
+    steps.append(dict(command="test", select="fp_prune_arms_agree", after_failure=True,
+                      vars={**steps[-1]["vars"], "fp_prune_oracle": True, "fp_prune_stale": sc.get("stale", {})}))
+    return steps
+
+
+def _expected_verdicts(here: Path, sid: int, arm: str) -> dict[str, str]:
+    lines = (here / f"seeds/fingerprint/fp_expected_{sid}_{arm}.csv").read_text().splitlines()[1:]
+    return dict(line.split(",", 1) for line in lines if line)
+
+
+def prune_matrix(here: Path) -> str:
+    """The treatment arm's outcome for every node and prune scenario, read from the expected seeds the tests assert."""
+    scenarios = [s for s in SCENARIOS if s.get("arms")]
+    registered = set(PRUNE_NODES) - PRUNE_UNREGISTERED
+    expected = {}
+    for s in scenarios:
+        for arm in PRUNE_ARMS:
+            verdicts = _expected_verdicts(here, s["id"], arm)
+            if set(verdicts) != registered:
+                raise SystemExit(f"[fingerprint] fp_expected_{s['id']}_{arm}.csv does not list exactly the registered "
+                                 f"fp_prune nodes: {sorted(set(verdicts) ^ registered)}")
+            expected[s["id"], arm] = verdicts
+    lines = ["| Node | " + " | ".join(f"{s['id']} {s['label']}" for s in scenarios) + " |",
+             "|---" * (len(scenarios) + 1) + "|"]
+    for node in PRUNE_NODES:
+        cells = []
+        for s in scenarios:
+            if node in PRUNE_UNREGISTERED:
+                cells.append("built, not registered")
+                continue
+            treatment = expected[s["id"], "treatment"][node]
+            if treatment != "skipped":
+                cells.append(f"built: {treatment}")
+                continue
+            behind = s.get("stale", {}).get(node)
+            control = expected[s["id"], "control"][node]
+            cells.append(f"**pruned** (control: {control}" + (f"; stale, {behind} row(s) behind)" if behind else ")"))
+        lines.append(f"| `{node}` | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def sync_matrix(here: Path, write: bool) -> int:
+    """Checks, or with write regenerates, the matrix between the markers in README.md."""
+    readme = here / "README.md"
+    text = readme.read_text()
+    start, end = text.find(MATRIX_START), text.find(MATRIX_END)
+    if start < 0 or end < start:
+        print("[fingerprint] FAIL: README.md has no fp_prune matrix markers")
+        return 1
+    start += len(MATRIX_START)
+    want = "\n" + prune_matrix(here) + "\n"
+    if text[start:end] == want:
+        print("[fingerprint] the fp_prune matrix in README.md is up to date")
+        return 0
+    if write:
+        readme.write_text(text[:start] + want + text[end:])
+        print("[fingerprint] wrote the fp_prune matrix into README.md")
+        return 0
+    print("[fingerprint] FAIL: the fp_prune matrix in README.md is out of date; regenerate it with --write-matrix")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--profile", default="default")
@@ -491,9 +652,15 @@ def main() -> int:
     parser.add_argument("--from", dest="from_id", type=int, help="first scenario id to run")
     parser.add_argument("--show", action="store_true", help="dump the ledger after every scenario")
     parser.add_argument("--no-seed", action="store_true", help="skip reseeding the fixtures")
+    parser.add_argument("--write-matrix", action="store_true",
+                        help="regenerate the fp_prune matrix in README.md from the expected seeds, then exit")
+    parser.add_argument("--check-matrix", action="store_true",
+                        help="exit non-zero when the fp_prune matrix in README.md is out of date")
     args = parser.parse_args()
 
     here = Path(__file__).resolve().parent
+    if args.write_matrix or args.check_matrix:
+        return sync_matrix(here, write=args.write_matrix)
     common = ["--profile", args.profile, "--target", args.target, "--project-dir", str(here)]
     run_tag = dt.datetime.now().strftime("%Y%m%d%H%M%S")
 
@@ -522,6 +689,18 @@ def main() -> int:
             print("[fingerprint] FAIL: seeding")
             return 1
 
+    # The prune group's schemas, created with Time Travel on; the arms' names come back as their ledger schemas.
+    prune_schemas: dict[str, str] = {}
+    if any(sc.get("arms") for sc in chosen):
+        proc = run([args.dbt, "run-operation", "fp_prune_setup", *common], capture=True)
+        output = (proc.stdout or "") + (proc.stderr or "")
+        print(output, end="", flush=True)
+        prune_schemas = dict(re.findall(PRUNE_SCHEMA_LINE, output))
+        if proc.returncode != 0 or set(prune_schemas) != {"input", *PRUNE_ARMS}:
+            print("[fingerprint] FAIL: setting up the fp_prune schemas")
+            return 1
+    frozen_stage = None
+
     results: list[tuple[int, str, bool]] = []
     for sc in chosen:
         sid = sc["id"]
@@ -532,12 +711,23 @@ def main() -> int:
             (here / path).write_text(FILE_VARIANTS[path][variant])
             print(f"[fingerprint] wrote {path} variant {variant!r}", flush=True)
 
-        steps = sc.get("steps") or [dict(select=sc["select"], flags=sc.get("flags", []), vars=sc.get("vars", {}),
-                                         expect_fail=sc.get("expect_fail", False),
-                                         expect_log=sc.get("expect_log", []), forbid_log=sc.get("forbid_log", []))]
+        if sc.get("arms"):
+            steps = prune_steps(sc, run_tag, prune_schemas, frozen_stage)
+        else:
+            steps = sc.get("steps") or [dict(select=sc["select"], flags=sc.get("flags", []), vars=sc.get("vars", {}),
+                                             expect_fail=sc.get("expect_fail", False),
+                                             expect_log=sc.get("expect_log", []),
+                                             forbid_log=sc.get("forbid_log", []))]
         ok = True
         last_vars = None
+        ran_previous = False
         for step in steps:
+            # After a failure only an after_failure step runs, and only when the step before it ran.
+            if not ok and not (step.get("after_failure") and ran_previous):
+                break
+            ran_previous = True
+            if "freeze" in step:
+                frozen_stage = None
             step_vars = {
                 "fp_iteration": sid,
                 "fingerprint": True,
@@ -558,7 +748,7 @@ def main() -> int:
             if failed != bool(step.get("expect_fail")):
                 print(f"[fingerprint] step {'succeeded but was expected to fail' if not failed else 'failed'}", flush=True)
                 ok = False
-                break
+                continue
             # Log assertions, for outcomes the ledger cannot hold (a guard that built while the ledger was unreachable).
             missing = [p for p in step.get("expect_log", []) if not re.search(p, output)]
             present = [p for p in step.get("forbid_log", []) if re.search(p, output)]
@@ -568,7 +758,9 @@ def main() -> int:
                 print(f"[fingerprint] step output has a forbidden line matching {p!r}", flush=True)
             if missing or present:
                 ok = False
-                break
+                continue
+            if "freeze" in step:
+                frozen_stage = step["freeze"]
 
         print(f"[fingerprint] {'PASS' if ok else 'FAIL'} {sid}", flush=True)
         results.append((sid, sc["desc"], ok))
