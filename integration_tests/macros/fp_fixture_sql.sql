@@ -10,10 +10,11 @@
     fp_bump_loaded_at         every row's _loaded_at set to now, a watermark game
     fp_shuffle                random row order, which must not register as a change
 
-  Its own var names throughout, because the other suites key their seeds off `iteration`.
+  Its own var names throughout, because the other suites key their seeds off `iteration`. A fixture that
+  passes `source` reads that seed instead of fp_source.
 #}
-{% macro fp_customer_rows() %}
-  {%- set source = var('fp_source', 'base') -%}
+{% macro fp_customer_rows(source=none) %}
+  {%- set source = source if source is not none else var('fp_source', 'base') -%}
   {%- set null_customer = var('fp_null_email_customer', none) -%}
   {%- set email_expr = 'upper(email)' if var('fp_upper_email', false) else 'email' -%}
   {%- if null_customer is not none -%}

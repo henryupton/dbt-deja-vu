@@ -86,3 +86,43 @@ models:
     description: Insert-overwrite table with a timestamp_ntz _loaded_at built under a Pacific/Auckland session; fp_edge_ntz_extra appends a row one hour above the watermark.
   - name: fp_edge_date
     description: Insert-overwrite table with a date _loaded_at; fp_edge_date_extra adds rows on the watermark day (modified) or a later day (appended).
+  - name: fp_knob_parent
+    description: Merge parent for the package-knob group (fingerprint_commands and the vars after it); unchanged after the group's initial.
+  - name: fp_knob_child
+    description: Guarded child of fp_knob_parent, the knob group's control; skips whenever its parent is unchanged.
+  - name: fp_knob_hookless
+    description: Built by the test-only hookless_table materialization, which runs no hooks (the serving-layer shape); excluded by materialization, so never registered.
+  - name: fp_knob_child_of_hookless
+    description: Guarded child of fp_knob_hookless and fp_knob_parent; the unfingerprinted parent alone builds it.
+  - name: fp_knob_wallclock
+    description: Guarded child of fp_knob_parent that reads the wall clock; skips like any other until fp_knob_wallclock_skip sets meta fingerprint_skip false, then always builds.
+  - name: fp_knob_scd2
+    description: SCD type 2 on its own source var (fp_knob_scd_source); moving it from appended to versioned adds a new version that closes an old row.
+  - name: fp_knob_child_of_scd2
+    description: Guarded child of fp_knob_scd2 that reads _valid_from and _valid_to, as an as-of join does; builds when a version closes.
+  - name: fp_sql_parent
+    description: Merge parent for the compiled-SQL group; unchanged after the group's initial. Its pre-hook plants a hashless 0.0.1 ledger row for the child fp_sql_legacy_child names.
+  - name: fp_sql_child
+    description: Guarded child of fp_sql_parent, the compiled-SQL group's control; nothing it renders moves.
+  - name: fp_sql_child_of_macro
+    description: Guarded child of fp_sql_parent that renders fp_sql_status_expr; the runner rewrites that macro, which moves its compiled SQL but not its checksum.
+  - name: fp_sql_child_of_var
+    description: Guarded child of fp_sql_parent that renders the fp_sql_label var into its SQL.
+  - name: fp_fault_parent
+    description: Merge parent for the fault group (statements that fail inside the fingerprint); unchanged after the group's initial.
+  - name: fp_fault_child
+    description: Guarded child of fp_fault_parent, the fault group's control; skips whenever the ledger works, builds when the guard cannot read it.
+  - name: fp_fault_parked
+    description: Merge child of fp_fault_parent whose post-hook always hashes; with fp_fault_park_segment set its hooks take the segment ledger away, so its fingerprint fails and must read error.
+  - name: fp_fault_child_of_parked
+    description: Guarded child of fp_fault_parent and fp_fault_parked; builds on the error verdict, and when fp_fault_parked is built in a run that registered nothing.
+  - name: fp_settle_parent
+    description: Merge parent for the settle group (a registration a run never settles); fp_settle_flip lowers a status, and with fp_settle_lose naming it its verdict is lost.
+  - name: fp_settle_child
+    description: Guarded child of fp_settle_parent that renders fp_settle_label; builds on a parent registration that recorded nothing, and with fp_settle_lose naming it its own verdict is lost.
+  - name: fp_mask_parent
+    description: Merge parent for the mask group (fingerprint_sql_mask_run_started_at); unchanged after the group's initial.
+  - name: fp_mask_child_of_stamp
+    description: Guarded child of fp_mask_parent that renders the run start as a _batched_at audit stamp; skips only while the mask hides that stamp from its compiled SQL hash.
+  - name: fp_mask_child_of_clock
+    description: Guarded child of fp_mask_parent that renders the run start in the same format but in a filter; the mask's template names the stamp's alias, so this always builds.
