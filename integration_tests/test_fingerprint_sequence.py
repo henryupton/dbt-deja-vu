@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 102 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 103 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -49,16 +49,18 @@ deploy (81); a guarded child's own builds it at its next selection, with its SQL
 another deploy (84) or a later step of its own (85).
 Scenarios 87 to 90 mask a run-start audit stamp out of the compiled SQL hash: the stamped child skips
 once masked, the child reading the clock in logic still builds.
-Scenarios 91 to 102 demonstrate pruning on the EDP trial line (models/fingerprint_prune). Each builds
+Scenarios 91 to 103 demonstrate pruning on the EDP trial line (models/fingerprint_prune). Each builds
 its selection twice from the same frozen inputs (models/fingerprint_prune_input, rebuilt between
 scenarios at the scenario's stage): a control arm with the guard off, then a treatment arm with it
 on, each its own deploy on its own schema and ledger (macros/fp_prune.sql), asserted against
 fp_expected_<n>_control and fp_expected_<n>_treatment. A third step then tests
 fp_prune_arms_agree, a content oracle independent of the package's hash: every fixture must match
 across the arms, bar the staleness scenarios 97, 99 and 100 declare (rows behind, or rows
-changed). --write-matrix regenerates the matrix in README.md from those seeds, and --check-matrix
-fails when it is out of date; neither runs dbt. A run that includes a prune scenario makes the
-same check before any dbt runs.
+changed). Every scenario selects the whole line bar 102, which selects as EDP deploys do,
+state:modified.body+ against a manifest the runner parses before writing the scenario's files.
+--write-matrix regenerates the matrix in README.md from those seeds, and --check-matrix fails when
+it is out of date; neither runs dbt. A run that includes a prune scenario makes the same check
+before any dbt runs.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -73,8 +75,10 @@ import atexit
 import datetime as dt
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CORE = "tag:fingerprint"
@@ -140,6 +144,32 @@ PRUNE_AS_OF_HEAD = (
     "    from {{ right }}\n"
     ") as {{ right }}\n"
 )
+# The intermediate, rewritten with one more comment line: a body-only change that EDP's deploy selector picks up.
+PRUNE_INT_ADH = "models/fingerprint_prune/fp_prune_int_adh.sql"
+PRUNE_INT_ADH_HEAD = (
+    "{{\n"
+    "    config(\n"
+    "        materialized='guarded_overwrite',\n"
+    "        tags=['fp_prune']\n"
+    "    )\n"
+    "}}\n"
+    "\n"
+    "{# Business logic over the event: prunable only when the event is unchanged, which a --full-refresh never leaves it. #}\n"
+    "{# The runner adds a comment line here from scenario 102: a body-only change, which state:modified.body+ selects. #}\n"
+)
+PRUNE_INT_ADH_SELECT = (
+    "select\n"
+    "    report_id,\n"
+    "    agent_id,\n"
+    "    report_date,\n"
+    "    occurred_at,\n"
+    "    scheduled_minutes,\n"
+    "    adherent_minutes,\n"
+    "    adherent_minutes / nullif(scheduled_minutes, 0) as adherence_ratio,\n"
+    "    _loaded_at,\n"
+    "    {{ fp_prune_audit_columns() }}\n"
+    "from {{ ref('fp_prune_evt_report') }}\n"
+)
 FILE_VARIANTS = {
     SEED_LIVE: {
         # customer 3 flips INACTIVE -> ACTIVE with the same timestamps
@@ -189,6 +219,9 @@ FILE_VARIANTS = {
             "    )\n"
             + SQL_MACRO_TAIL
         ),
+    },
+    PRUNE_INT_ADH: {
+        "changed": PRUNE_INT_ADH_HEAD + "{# Rewritten by the runner: this comment is the change. #}\n" + PRUNE_INT_ADH_SELECT,
     },
 }
 
@@ -256,9 +289,16 @@ PRUNE_NODES = ["fp_prune_evt_report", "fp_prune_int_adh", "fp_prune_dim_agent", 
                "fp_prune_dm_country", "fp_prune_dashboard", "fp_prune_striking"]
 PRUNE_UNREGISTERED = {"fp_prune_dashboard"}
 PRUNE_SCHEMA_LINE = r"fp_prune: (input|control|treatment) schema (\S+)"
-# A test that is disabled or selects nothing exits 0, so the oracle step must show it ran and passed.
+# A test that is disabled or selects nothing exits 0, so the oracle step must show it ran and passed, and so must
+# each arm's ledger check, which a state selector could leave out.
 ORACLE_PASSED = r"Passed \[[^\]]*\] test +\S+\.fp_prune_arms_agree\b"
+LEDGER_PASSED = r"Passed \[[^\]]*\] test +\S+\.matches_expected_seed_fp_ledger_"
 NOTHING_SELECTED = r"NoNodesForSelectionCriteria|NoNodesSelected"
+# EDP's deploy selector: nodes whose own file changed against the manifest parsed before the change, and descendants.
+STATE_SELECT = "state:modified.body+"
+STATE_GUARD_LOG = [r"fingerprint: fp_prune_int_adh parents registered=0 blocking=0; building",
+                   r"fingerprint: fp_prune_fct_daily parents registered=1 blocking=0, checksum and compiled SQL unchanged; "
+                   r"may skip"]
 MATRIX_START = "<!-- fp_prune matrix: generated by ./test_fingerprint_sequence.py --write-matrix; do not edit by hand -->"
 MATRIX_END = "<!-- fp_prune matrix end -->"
 
@@ -571,11 +611,18 @@ SCENARIOS = [
     dict(id=101, label="resync again (guard off)", desc="prune: the treatment rebuilt with the guard off after the late "
                                                         "agent; the arms are identical again", arms=True, guard=False,
          stage=9, select=PRUNE, flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    # state=True parses the project before the scenario's files are written and builds against that manifest, so only
+    # the rewritten intermediate and its descendants (nodes) are selected; the dim and the event are never registered.
+    dict(id=102, label="state:modified.body+ deploy", desc="prune: a body-only change to the intermediate deployed under "
+                                                          "EDP's selector; the fact prunes though the dim is unregistered",
+         arms=True, stage=9, state=True, select=STATE_SELECT, flags=FULL_REFRESH, vars=PRUNE_VARS,
+         files={PRUNE_AS_OF: "changed", PRUNE_INT_ADH: "changed"}, treatment_log=STATE_GUARD_LOG,
+         nodes={"fp_prune_int_adh", "fp_prune_fct_daily", "fp_prune_dm_fct"}),
     # Every guarded fixture renders the run-start stamp, so without the mask none of them can prune. Last, because the
     # unmasked hashes it records would build every guarded node once more at the next masked deploy.
-    dict(id=102, label="mask off", desc="prune: a no-op deploy without fingerprint_sql_mask_run_started_at; every guarded "
+    dict(id=103, label="mask off", desc="prune: a no-op deploy without fingerprint_sql_mask_run_started_at; every guarded "
                                         "node builds on its moved compiled SQL", arms=True, stage=9, select=PRUNE,
-         flags=FULL_REFRESH, vars=PRUNE_UNMASKED, files={PRUNE_AS_OF: "changed"}),
+         flags=FULL_REFRESH, vars=PRUNE_UNMASKED, files={PRUNE_AS_OF: "changed", PRUNE_INT_ADH: "changed"}),
 ]
 
 
@@ -600,7 +647,21 @@ def _original_text(here: Path, path: str) -> str:
     return committed
 
 
-def prune_steps(sc: dict, run_tag: str, schemas: dict[str, str], frozen_stage: int | None) -> list[dict]:
+def parse_state(dbt: str, common: list[str], here: Path) -> str | None:
+    """Parses the project as it stands and keeps its manifest in a temporary directory, for --state."""
+    manifest = here / "target" / "manifest.json"
+    manifest.unlink(missing_ok=True)
+    proc = run([dbt, "parse", "--vars", json.dumps({"fingerprint": True}), *common])
+    if proc.returncode != 0 or not manifest.exists():
+        return None
+    state = tempfile.mkdtemp(prefix="fp_prune_state_")
+    atexit.register(shutil.rmtree, state, ignore_errors=True)
+    shutil.copy(manifest, Path(state) / "manifest.json")
+    return state
+
+
+def prune_steps(sc: dict, run_tag: str, schemas: dict[str, str], frozen_stage: int | None,
+                state_dir: str | None) -> list[dict]:
     """A prune scenario's steps: the frozen inputs rebuilt at its stage unless they are there already, one build per
     arm, each its own deploy on its own schema and ledger, asserted against fp_expected_<id>_<arm>, then the content
     oracle under the treatment's vars, which runs even when the treatment's build failed."""
@@ -609,12 +670,15 @@ def prune_steps(sc: dict, run_tag: str, schemas: dict[str, str], frozen_stage: i
     if frozen_stage != sc["stage"]:
         steps.append(dict(select=PRUNE_INPUT, flags=FULL_REFRESH, freeze=sc["stage"],
                           vars={"fingerprint": False, "fp_prune_stage": sc["stage"]}))
+    state_flags = ["--state", state_dir] if state_dir else []
     for arm in PRUNE_ARMS:
         arm_vars = {**sc.get("vars", {}), "fp_prune_arm": arm, "fp_prune_stage": sc["stage"],
                     "fingerprint_schema": schemas[arm], "deploy_id": f"fp_{run_tag}_{sid}_{arm}",
                     "fp_iteration": f"{sid}_{arm}",
                     "fingerprint_skip_unchanged_upstream": arm == "treatment" and sc.get("guard", True)}
-        steps.append(dict(select=sc["select"], flags=sc.get("flags", []), vars=arm_vars))
+        arm_log = sc.get("treatment_log", []) if arm == "treatment" else []
+        steps.append(dict(select=sc["select"], flags=[*sc.get("flags", []), *state_flags], vars=arm_vars,
+                          expect_log=[LEDGER_PASSED, *arm_log], forbid_log=[NOTHING_SELECTED]))
     steps.append(dict(command="test", select="fp_prune_arms_agree", after_failure=True,
                       vars={**steps[-1]["vars"], "fp_prune_oracle": True, "fp_prune_stale": sc.get("stale", {})},
                       expect_log=[ORACLE_PASSED], forbid_log=[NOTHING_SELECTED]))
@@ -629,20 +693,23 @@ def _expected_verdicts(here: Path, sid: int, arm: str) -> dict[str, str]:
 def prune_matrix(here: Path) -> str:
     """The treatment arm's outcome for every node and prune scenario, read from the expected seeds the tests assert."""
     scenarios = [s for s in SCENARIOS if s.get("arms")]
-    registered = set(PRUNE_NODES) - PRUNE_UNREGISTERED
     expected = {}
     for s in scenarios:
+        registered = set(s.get("nodes", PRUNE_NODES)) - PRUNE_UNREGISTERED
         for arm in PRUNE_ARMS:
             verdicts = _expected_verdicts(here, s["id"], arm)
             if set(verdicts) != registered:
-                raise SystemExit(f"[fingerprint] fp_expected_{s['id']}_{arm}.csv does not list exactly the registered "
-                                 f"fp_prune nodes: {sorted(set(verdicts) ^ registered)}")
+                raise SystemExit(f"[fingerprint] fp_expected_{s['id']}_{arm}.csv does not list exactly the fp_prune "
+                                 f"nodes the scenario registers: {sorted(set(verdicts) ^ registered)}")
             expected[s["id"], arm] = verdicts
     lines = ["| Node | " + " | ".join(f"{s['id']} {s['label']}" for s in scenarios) + " |",
              "|---" * (len(scenarios) + 1) + "|"]
     for node in PRUNE_NODES:
         cells = []
         for s in scenarios:
+            if node not in s.get("nodes", PRUNE_NODES):
+                cells.append("not selected")
+                continue
             if node in PRUNE_UNREGISTERED:
                 cells.append("built, not registered")
                 continue
@@ -710,7 +777,7 @@ def main() -> int:
     if any(sc.get("arms") for sc in chosen) and sync_matrix(here, write=False) != 0:
         return 1
 
-    originals ={path: _original_text(here, path) for path in FILE_VARIANTS}
+    originals = {path: _original_text(here, path) for path in FILE_VARIANTS}
 
     def restore_files() -> None:
         for path, text in originals.items():
@@ -746,12 +813,21 @@ def main() -> int:
         deploy_id = f"fp_{run_tag}_{sid}"
         print(f"\n[fingerprint] ===== {sid}: {sc['desc']} =====", flush=True)
 
+        # A state selector compares against the project as the scenarios before this one left it.
+        state_dir = None
+        if sc.get("state"):
+            state_dir = parse_state(args.dbt, common, here)
+            if state_dir is None:
+                print(f"[fingerprint] FAIL {sid}: parsing the state manifest", flush=True)
+                results.append((sid, sc["desc"], False))
+                continue
+
         for path, variant in sc.get("files", {}).items():
             (here / path).write_text(FILE_VARIANTS[path][variant])
             print(f"[fingerprint] wrote {path} variant {variant!r}", flush=True)
 
         if sc.get("arms"):
-            steps = prune_steps(sc, run_tag, prune_schemas, frozen_stage)
+            steps = prune_steps(sc, run_tag, prune_schemas, frozen_stage, state_dir)
         else:
             steps = sc.get("steps") or [dict(select=sc["select"], flags=sc.get("flags", []), vars=sc.get("vars", {}),
                                              expect_fail=sc.get("expect_fail", False),

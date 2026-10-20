@@ -6,6 +6,7 @@
 }}
 
 {# Business logic over the event: prunable only when the event is unchanged, which a --full-refresh never leaves it. #}
+{# The runner adds a comment line here from scenario 102: a body-only change, which state:modified.body+ selects. #}
 select
     report_id,
     agent_id,
