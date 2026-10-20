@@ -4,7 +4,8 @@ seeds:
   - name: fp_prune_raw_reports
     description: >
       Support-agent adherence reports, one per agent and day. Stage 0 holds June to August; stage 7 adds a day for
-      every agent, the new one included. Only the frozen staging tables read it, filtered by fp_prune_stage.
+      every agent, the new one included; stage 8 a report for an agent with no version until stage 9. Only the frozen
+      staging tables read it, filtered by fp_prune_stage.
     config:
       tags: [fp_prune_input]
       column_types:
@@ -17,8 +18,9 @@ seeds:
         _stage: integer
   - name: fp_prune_raw_agent_lifecycle
     description: >
-      Agent versions. Stage 4 lands a version dated between two of agent 1's (backdated), stages 5 and 6 versions
-      dated after every report (forward-dated), stage 7 a new agent.
+      Agent versions. Stage 4 lands a version dated between two of agent 1's (backdated), stages 5, 6 and 8 versions
+      dated after every report (forward-dated), stage 7 a new agent, and stage 9 one whose first version is dated
+      after its only report, which only the as-of join's pre-history fallback resolves.
     config:
       tags: [fp_prune_input]
       column_types:

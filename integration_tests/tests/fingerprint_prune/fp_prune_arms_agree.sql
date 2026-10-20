@@ -9,9 +9,10 @@
   The content oracle, independent of the package's hash. The runner tests it on its own (fp_prune_oracle) once both
   arms have built the same selection from the same frozen inputs, with the treatment's vars, so a failure here never
   skips the ledger checks of the build. Compares count(*) and hash_agg of every fixture across the two schemas, audit
-  stamps left out. A relation fp_prune_stale names (relation: rows) is stale on purpose: the treatment must equal its
-  own content at its deploy's snapshot, and the control that content plus exactly that many rows, every one above the
-  treatment's watermark. One row per relation that disagrees.
+  stamps left out. A relation fp_prune_stale names ({behind, changed}) is stale on purpose: the treatment must equal its
+  own content at its deploy's snapshot; the control must hold exactly `behind` rows above the treatment's watermark, and
+  at or below it as many rows as the treatment, `changed` of them different on each side. One row per relation that
+  disagrees.
 #}
 {%- set stale = var('fp_prune_stale', {}) or {} -%}
 {%- set checks = [] -%}
@@ -33,18 +34,24 @@
       {%- for c in adapter.get_columns_in_relation(control) -%}
         {%- if (c.name | upper) not in ['_BATCHED_AT', '_WRITTEN_AT'] -%}{%- do cols.append(adapter.quote(c.name)) -%}{%- endif -%}
       {%- endfor -%}
-      {%- set agg = "count(*) as n, hash_agg(" ~ (cols | join(', ')) ~ ") as h" -%}
+      {%- set col_csv = cols | join(', ') -%}
+      {%- set agg = "count(*) as n, hash_agg(" ~ col_csv ~ ") as h" -%}
       {%- if n.name in stale -%}
+        {%- set behind = (stale[n.name].behind | default(0)) | int -%}
+        {%- set changed = (stale[n.name].changed | default(0)) | int -%}
+        {%- set control_old = "(select " ~ col_csv ~ " from " ~ control ~ " where _loaded_at <= (select max(_loaded_at) from " ~ treatment ~ "))" -%}
         {%- do checks.append(
-            "select '" ~ n.name ~ "' as relation_name, 'stale by " ~ stale[n.name] ~ " row(s)' as expectation,"
+            "select '" ~ n.name ~ "' as relation_name, 'stale: " ~ behind ~ " behind, " ~ changed ~ " changed' as expectation,"
             ~ " c.n as control_rows, t.n as treatment_rows"
             ~ " from (select " ~ agg ~ " from " ~ control ~ ") c,"
             ~ " (select " ~ agg ~ " from " ~ treatment ~ ") t,"
             ~ " (select " ~ agg ~ " from " ~ treatment ~ " at(timestamp => " ~ snap ~ ")) tp,"
-            ~ " (select " ~ agg ~ " from " ~ control ~ " where _loaded_at <= (select max(_loaded_at) from " ~ treatment ~ ")) co"
+            ~ " (select " ~ agg ~ " from " ~ control_old ~ ") co,"
+            ~ " (select count(*) as n from (select * from " ~ control_old ~ " minus select " ~ col_csv ~ " from " ~ treatment ~ ")) cx,"
+            ~ " (select count(*) as n from (select " ~ col_csv ~ " from " ~ treatment ~ " minus select * from " ~ control_old ~ ")) tx"
             ~ " where t.n <> tp.n or not equal_null(t.h, tp.h)"
-            ~ " or co.n <> t.n or not equal_null(co.h, t.h)"
-            ~ " or c.n - t.n <> " ~ (stale[n.name] | int)) -%}
+            ~ " or c.n - co.n <> " ~ behind ~ " or co.n <> t.n or cx.n <> " ~ changed ~ " or tx.n <> " ~ changed
+            ~ (" or not equal_null(co.h, t.h)" if changed == 0 else "")) -%}
       {%- else -%}
         {%- do checks.append(
             "select '" ~ n.name ~ "' as relation_name, 'equal' as expectation, c.n as control_rows, t.n as treatment_rows"
@@ -60,6 +67,9 @@
     {%- if name not in fixtures -%}
       {%- do exceptions.raise_compiler_error("fp_prune_stale names " ~ name ~ ", which is not an fp_prune fixture") -%}
     {%- endif -%}
+    {%- for key in stale[name] if key not in ['behind', 'changed'] -%}
+      {%- do exceptions.raise_compiler_error("fp_prune_stale gives " ~ name ~ " " ~ key ~ "; only behind and changed are known") -%}
+    {%- endfor -%}
   {%- endfor -%}
 {%- endif -%}
 {%- if checks | length == 0 %}

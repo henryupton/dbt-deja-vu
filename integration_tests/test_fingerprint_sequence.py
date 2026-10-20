@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content fingerprint scenario suite.
 
-Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 99 ordered
+Drives the fingerprint fixtures (models/fingerprint*, seeds/fingerprint) through 102 ordered
 scenarios. After each, the matches_expected_seed test on fp_ledger asserts the verdict recorded
 for every selected fixture against seeds/fingerprint/fp_expected_<n>.csv. Each scenario is its
 own deploy id, so the ledger accumulates and reruns never collide. Scenarios are stateful and
@@ -49,15 +49,16 @@ deploy (81); a guarded child's own builds it at its next selection, with its SQL
 another deploy (84) or a later step of its own (85).
 Scenarios 87 to 90 mask a run-start audit stamp out of the compiled SQL hash: the stamped child skips
 once masked, the child reading the clock in logic still builds.
-Scenarios 91 to 99 demonstrate pruning on the EDP trial line (models/fingerprint_prune). Each builds
+Scenarios 91 to 102 demonstrate pruning on the EDP trial line (models/fingerprint_prune). Each builds
 its selection twice from the same frozen inputs (models/fingerprint_prune_input, rebuilt between
 scenarios at the scenario's stage): a control arm with the guard off, then a treatment arm with it
 on, each its own deploy on its own schema and ledger (macros/fp_prune.sql), asserted against
 fp_expected_<n>_control and fp_expected_<n>_treatment. A third step then tests
 fp_prune_arms_agree, a content oracle independent of the package's hash: every fixture must match
-across the arms, bar the staleness scenario 97 declares. --write-matrix regenerates the matrix in
-README.md from those seeds, and --check-matrix fails when it is out of date; neither runs dbt. A
-run that includes a prune scenario makes the same check before any dbt runs.
+across the arms, bar the staleness scenarios 97, 99 and 100 declare (rows behind, or rows
+changed). --write-matrix regenerates the matrix in README.md from those seeds, and --check-matrix
+fails when it is out of date; neither runs dbt. A run that includes a prune scenario makes the
+same check before any dbt runs.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -123,16 +124,21 @@ SQL_MACRO_HEAD = (
     "{% macro fp_sql_status_expr(column) %}\n"
 )
 SQL_MACRO_TAIL = "{% endmacro %}\n"
-# The as-of join only fp_prune_fct_daily renders: the variant writes the same predicate the other way round, so the
+# The as-of join only fp_prune_fct_daily renders: the variant writes the same predicates the other way round, so the
 # fact's compiled SQL moves while its output and its checksum stay put.
 PRUNE_AS_OF = "macros/fp_prune_as_of_join.sql"
 PRUNE_AS_OF_HEAD = (
     "{#\n"
-    "  Test-only: the as-of join predicate fp_prune_fct_daily renders, and the only model that does. The runner rewrites\n"
-    "  this file from scenario 93 with the same predicate written the other way round, so the fact's compiled SQL moves\n"
-    "  while its output and its own checksum stay put.\n"
+    "  Test-only: EDP's as_of_join shape, which fp_prune_fct_daily renders and no other model does. A left join onto the\n"
+    "  scd dim on a timestamp cursor inside each version's validity, falling back to the entity's first version for a\n"
+    "  row dated before it. The runner rewrites this file from scenario 93 with the same predicates the other way round,\n"
+    "  so the fact's compiled SQL moves while its output and its own checksum stay put.\n"
     "#}\n"
-    "{% macro fp_prune_as_of_join(fact_date, dim) %}\n"
+    "{% macro fp_prune_as_of_join(left, right, join_key, left_updated_at) %}\n"
+    "left join (\n"
+    "    select *, min(_valid_from) over (partition by {{ join_key }}) as _as_of_first_valid_from\n"
+    "    from {{ right }}\n"
+    ") as {{ right }}\n"
 )
 FILE_VARIANTS = {
     SEED_LIVE: {
@@ -174,7 +180,13 @@ FILE_VARIANTS = {
     PRUNE_AS_OF: {
         "changed": (
             PRUNE_AS_OF_HEAD
-            + "  {{ return(dim ~ '._valid_from::date <= ' ~ fact_date ~ ' and ' ~ fact_date ~ ' < ' ~ dim ~ '._valid_to::date') }}\n"
+            + "    on {{ right }}.{{ join_key }} = {{ left }}.{{ join_key }}\n"
+            "    and (\n"
+            "        ({{ right }}._valid_from <= {{ left }}.{{ left_updated_at }}"
+            " and {{ right }}._valid_to > {{ left }}.{{ left_updated_at }})\n"
+            "        or ({{ right }}._valid_from > {{ left }}.{{ left_updated_at }} and {{ right }}._change_type = 'I'\n"
+            "            and {{ right }}._as_of_first_valid_from = {{ right }}._valid_from)\n"
+            "    )\n"
             + SQL_MACRO_TAIL
         ),
     },
@@ -512,7 +524,8 @@ SCENARIOS = [
          select=MASK, vars=MASKED),
     # --- prune: the EDP trial line, built by a control arm (guard off) and a treatment arm (guard on) ------------------
     # arms=True runs the selection once per arm; stage is the frozen inputs' state, guard=False keeps the treatment's
-    # guard off too, and stale names the relations the treatment leaves behind on purpose (relation: rows behind).
+    # guard off too, and stale names the relations the treatment leaves behind on purpose: rows the control has above
+    # the treatment's watermark (behind), and rows at or below it that differ (changed).
     dict(id=91, label="S1 baseline (guard off)", desc="prune: baseline with the guard off in both arms; every object "
                                                      "created or replaced", arms=True, guard=False, stage=0,
          select=PRUNE, flags=FULL_REFRESH,
@@ -537,14 +550,31 @@ SCENARIOS = [
     dict(id=97, label="S7 appended", desc="prune: rows appended to the dim and the intermediate; their children prune and "
                                           "are stale by exactly those rows", arms=True, stage=7, select=PRUNE,
          flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"},
-         stale={"fp_prune_fct_daily": 4, "fp_prune_dm_fct": 4, "fp_prune_dm_dim_agent": 1}),
+         stale={"fp_prune_fct_daily": dict(behind=4), "fp_prune_dm_fct": dict(behind=4),
+                "fp_prune_dm_dim_agent": dict(behind=1)}),
     dict(id=98, label="S8 resync (guard off)", desc="prune: the treatment rebuilt with the guard off; the arms are "
                                                     "identical again", arms=True, guard=False, stage=7, select=PRUNE,
          flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
+    # A late-arriving dim under the left as-of join. The forward-dated version that lands with the report blocks, so the
+    # fact builds and carries the report with a null team; the mart behind it prunes on the appended fact.
+    dict(id=99, label="late report", desc="prune: a report lands before its agent's first version; a forward-dated "
+                                          "version builds the fact, which carries it with a null team", arms=True,
+         stage=8, select=PRUNE, flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"},
+         stale={"fp_prune_dm_fct": dict(behind=1)}),
+    # The first version is dated after the report, so only the pre-history fallback resolves it. Appended never blocks:
+    # the fact prunes with the report's team still null, a changed row at its watermark rather than a missing one.
+    dict(id=100, label="late agent", desc="prune: the agent's first version is appended; the fact prunes and keeps the "
+                                          "report's null team", arms=True, stage=9, select=PRUNE, flags=FULL_REFRESH,
+         vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"},
+         stale={"fp_prune_fct_daily": dict(changed=1), "fp_prune_dm_fct": dict(behind=1),
+                "fp_prune_dm_dim_agent": dict(behind=1)}),
+    dict(id=101, label="resync again (guard off)", desc="prune: the treatment rebuilt with the guard off after the late "
+                                                        "agent; the arms are identical again", arms=True, guard=False,
+         stage=9, select=PRUNE, flags=FULL_REFRESH, vars=PRUNE_VARS, files={PRUNE_AS_OF: "changed"}),
     # Every guarded fixture renders the run-start stamp, so without the mask none of them can prune. Last, because the
     # unmasked hashes it records would build every guarded node once more at the next masked deploy.
-    dict(id=99, label="mask off", desc="prune: a no-op deploy without fingerprint_sql_mask_run_started_at; every guarded "
-                                       "node builds on its moved compiled SQL", arms=True, stage=7, select=PRUNE,
+    dict(id=102, label="mask off", desc="prune: a no-op deploy without fingerprint_sql_mask_run_started_at; every guarded "
+                                        "node builds on its moved compiled SQL", arms=True, stage=9, select=PRUNE,
          flags=FULL_REFRESH, vars=PRUNE_UNMASKED, files={PRUNE_AS_OF: "changed"}),
 ]
 
@@ -620,9 +650,10 @@ def prune_matrix(here: Path) -> str:
             if treatment != "skipped":
                 cells.append(f"built: {treatment}")
                 continue
-            behind = s.get("stale", {}).get(node)
+            stale = s.get("stale", {}).get(node, {})
+            lag = [f"{stale[k]} row(s) {k}" for k in ("behind", "changed") if stale.get(k)]
             control = expected[s["id"], "control"][node]
-            cells.append(f"**pruned** (control: {control}" + (f"; stale, {behind} row(s) behind)" if behind else ")"))
+            cells.append(f"**pruned** (control: {control}" + (f"; stale, {', '.join(lag)})" if lag else ")"))
         lines.append(f"| `{node}` | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 

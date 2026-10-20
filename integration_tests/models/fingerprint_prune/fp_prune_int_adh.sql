@@ -10,6 +10,7 @@ select
     report_id,
     agent_id,
     report_date,
+    occurred_at,
     scheduled_minutes,
     adherent_minutes,
     adherent_minutes / nullif(scheduled_minutes, 0) as adherence_ratio,

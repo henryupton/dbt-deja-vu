@@ -8,7 +8,7 @@ models:
   - name: fp_prune_dim_agent
     description: SCD type 2 agent dim (dbt-scd2-utils). Unguarded, so it always builds; a backdated or forward-dated version reads modified (the validity columns are hashed), a new agent appended.
   - name: fp_prune_fct_daily
-    description: Guarded fact joining each report to the agent version in force on its day, through fp_prune_as_of_join, the only model that renders that macro.
+    description: Guarded fact joining each report to the agent version in force when it occurred, through fp_prune_as_of_join (EDP's left as-of join with its pre-history fallback), the only model that renders that macro. A report whose agent has no version yet keeps a null team.
   - name: fp_prune_dm_fct
     description: Guarded row-level mart over the fact; prunes when the fact was pruned or rebuilt unchanged (early cutoff).
   - name: fp_prune_dm_dim_agent
