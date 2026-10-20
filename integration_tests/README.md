@@ -238,9 +238,10 @@ Each scenario (`arms=True` in the runner) builds its selection twice from the sa
 - **treatment** - guard on (off in 91, 98 and 101), in `<target schema>_prune_treatment`, with its own ledger.
 
 The ledgers have to be separate: the guard reads every deploy's rows for a parent's node id, and both arms share node
-ids, so one ledger would let the control's verdicts block the treatment's skips. `macros/fp_prune.sql` routes the
-arm models by the `fp_prune_arm` var (`generate_schema_name`), and `fp_prune_setup` creates the three schemas with one
-day of Time Travel, which every table inherits.
+ids, so one ledger would let the control's verdicts block the treatment's skips. Scenario 100 is where that shows: the
+control's `fct_daily` reads `modified` there while the treatment's is pruned, and on one ledger that verdict builds the
+treatment's `dm_fct`. `macros/fp_prune.sql` routes the arm models by the `fp_prune_arm` var (`generate_schema_name`),
+and `fp_prune_setup` creates the three schemas with one day of Time Travel, which every table inherits.
 
 That retention is a precondition of every pruned cell, not a fixture detail. At retention 0 every fingerprinted table
 reads `error`, which blocks, so nothing prunes and the guard looks broken. EDP's `ANALYTICS` schemas keep 28 days
