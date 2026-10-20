@@ -212,7 +212,12 @@ stg_country_lifecycle (frozen) -> dim_country (scd 2) -> dm_country -> dashboard
 - Every guarded node is built by the test-only `guarded_overwrite` (`macros/guarded_overwrite.sql`), EDP's
   `truncate_insert` with the guard in it. It keeps the object under `--full-refresh` (insert overwrite by column name,
   shared with `overwrite_table`) and replaces it only when it is missing, is not a table, or `force_full_refresh` is
-  set. The guard sits after that decision and before the pre-hooks.
+  set. Hooks, `persist_docs`, the commit and `apply_grants` run in `truncate_insert`'s order. The guard sits after the
+  replace decision and before the first pre-hook, so a pruned node runs none of them: its grants, persisted docs and
+  whatever its post-hooks apply (EDP's sensitivity tags) stay as its last build left them.
+- On Fusion the view, the built-in incremental and dbt-scd2-utils' `scd` run only inside-transaction hooks, so
+  `fingerprint_post` has to be a plain post-hook. As `transaction: false` it would never run on those nodes, and they
+  would stay `pending` and block every child.
 - The scd dims (dbt-scd2-utils) and the built-in incremental event have no guard, so they always build; their verdicts
   are what the guarded nodes read.
 - `fct_daily` is the only model that renders `fp_prune_as_of_join` (`macros/fp_prune_as_of_join.sql`), so rewriting it

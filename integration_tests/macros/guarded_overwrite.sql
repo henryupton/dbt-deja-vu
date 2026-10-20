@@ -2,8 +2,8 @@
   Test-only materialization: EDP's truncate_insert with the guard in it, for the fp_prune group. It keeps the
   object under --full-refresh: create or replace only when the relation is missing, is not a table, or the
   force_full_refresh var is set; otherwise insert overwrite by column name (fp_insert_overwrite_sql, shared with
-  overwrite_table). The guard sits after that decision and before the pre-hooks, so a skip runs nothing, and a
-  replace is never skipped: it is the build that makes a fresh object.
+  overwrite_table). Hooks, docs, commit and grants run in truncate_insert's order. The guard sits after the replace
+  decision and before the first pre-hook, so a skip runs none of them, and a replace is never skipped.
 #}
 
 {% materialization guarded_overwrite, default %}
@@ -22,7 +22,8 @@
     {{ return({'relations': [existing_relation]}) }}
   {%- endif -%}
 
-  {{ run_hooks(pre_hooks) }}
+  {{ run_hooks(pre_hooks, inside_transaction=False) }}
+  {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   {%- call statement('main') -%}
     {%- if do_replace -%}
@@ -32,7 +33,13 @@
     {%- endif -%}
   {%- endcall -%}
 
-  {{ run_hooks(post_hooks) }}
+  {% do persist_docs(target_relation, model) %}
+
+  {{ run_hooks(post_hooks, inside_transaction=True) }}
+  {{ adapter.commit() }}
+  {{ run_hooks(post_hooks, inside_transaction=False) }}
+
+  {% do apply_grants(target_relation, config.get('grants', {}), should_revoke=true) %}
 
   {{ return({'relations': [target_relation]}) }}
 
