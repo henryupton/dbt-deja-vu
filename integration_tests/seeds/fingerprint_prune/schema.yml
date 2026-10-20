@@ -1,0 +1,41 @@
+version: 2
+
+seeds:
+  - name: fp_prune_raw_reports
+    description: >
+      Support-agent adherence reports, one per agent and day. Stage 0 holds June to August; stage 7 adds a day for
+      every agent, the new one included. Only the frozen staging tables read it, filtered by fp_prune_stage.
+    config:
+      tags: [fp_prune_input]
+      column_types:
+        report_id: integer
+        agent_id: integer
+        report_date: date
+        scheduled_minutes: integer
+        adherent_minutes: integer
+        _loaded_at: timestamp_tz
+        _stage: integer
+  - name: fp_prune_raw_agent_lifecycle
+    description: >
+      Agent versions. Stage 4 lands a version dated between two of agent 1's (backdated), stages 5 and 6 versions
+      dated after every report (forward-dated), stage 7 a new agent.
+    config:
+      tags: [fp_prune_input]
+      column_types:
+        agent_id: integer
+        agent_name: varchar
+        team: varchar
+        _updated_at: timestamp_tz
+        _loaded_at: timestamp_tz
+        _stage: integer
+  - name: fp_prune_raw_country_lifecycle
+    description: Country versions, all at stage 0, so the country branch never changes.
+    config:
+      tags: [fp_prune_input]
+      column_types:
+        country_code: varchar
+        country_name: varchar
+        region: varchar
+        _updated_at: timestamp_tz
+        _loaded_at: timestamp_tz
+        _stage: integer

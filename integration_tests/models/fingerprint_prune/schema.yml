@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: fp_prune_evt_report
+    description: Built-in incremental (delete+insert) over the frozen reports. Under --full-refresh it is created or replaced, so it reads new and blocks its child; without it, a run with no new reports writes nothing and reads unchanged.
+  - name: fp_prune_int_adh
+    description: Guarded intermediate over the event (guarded_overwrite, the EDP truncate_insert shape); prunes only when the event did not move.
+  - name: fp_prune_dim_agent
+    description: SCD type 2 agent dim (dbt-scd2-utils). Unguarded, so it always builds; a backdated or forward-dated version reads modified (the validity columns are hashed), a new agent appended.
+  - name: fp_prune_fct_daily
+    description: Guarded fact joining each report to the agent version in force on its day, through fp_prune_as_of_join, the only model that renders that macro.
+  - name: fp_prune_dm_fct
+    description: Guarded row-level mart over the fact; prunes when the fact was pruned or rebuilt unchanged (early cutoff).
+  - name: fp_prune_dm_dim_agent
+    description: Guarded mart copy of the agent dim with its validity columns; builds on any version that moves them.
+  - name: fp_prune_dim_agent_current
+    description: View of the current agent versions. A view always reads new, so its child always builds.
+  - name: fp_prune_rpt
+    description: Guarded roster report over the current-agent view; never prunable.
+  - name: fp_prune_dim_country
+    description: SCD type 2 country dim on input that never changes; the sibling branch.
+  - name: fp_prune_dm_country
+    description: Guarded mart over the country dim; prunes in every deploy after the baseline.
+  - name: fp_prune_dashboard
+    description: Hookless leaf (the streamlit stand-in), excluded by materialization, so never registered; builds in every deploy.
+  - name: fp_prune_striking
+    description: Guarded mart that reads current_date() in a filter, opted out with meta fingerprint_skip false, so it builds in every deploy. Every version took effect before any run, so its rows never move.
