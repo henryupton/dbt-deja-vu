@@ -56,7 +56,8 @@ on, each its own deploy on its own schema and ledger (macros/fp_prune.sql), asse
 fp_expected_<n>_control and fp_expected_<n>_treatment. A third step then tests
 fp_prune_arms_agree, a content oracle independent of the package's hash: every fixture must match
 across the arms, bar the staleness scenario 97 declares. --write-matrix regenerates the matrix in
-README.md from those seeds, and --check-matrix fails when it is out of date; neither runs dbt.
+README.md from those seeds, and --check-matrix fails when it is out of date; neither runs dbt. A
+run that includes a prune scenario makes the same check before any dbt runs.
 
 Usage:
     ./test_fingerprint_sequence.py [--profile default] [--target dev] [--dbt /path/to/dbt]
@@ -674,8 +675,11 @@ def main() -> int:
         chosen = [s for s in SCENARIOS if s["id"] in wanted]
     if args.from_id:
         chosen = [s for s in chosen if s["id"] >= args.from_id]
+    # The matrix claims to come from the expectations this run asserts; one out of date fails before any dbt runs.
+    if any(sc.get("arms") for sc in chosen) and sync_matrix(here, write=False) != 0:
+        return 1
 
-    originals = {path: _original_text(here, path) for path in FILE_VARIANTS}
+    originals ={path: _original_text(here, path) for path in FILE_VARIANTS}
 
     def restore_files() -> None:
         for path, text in originals.items():
