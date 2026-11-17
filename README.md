@@ -9,6 +9,20 @@ Everything is a no-op until `fingerprint: true` is set. Skipping needs two more 
 `fingerprint_skip_unchanged_upstream` on, and a materialization that calls `fingerprint_should_skip()` before it
 builds. The package ships no materialization, so wrapping or overriding yours is up to you (see the guard below).
 
+## Why
+
+dbt picks what to rebuild from code and never looks at the data. `state:modified` compares each model's file with a saved production manifest, so a comment-only edit to one staging model selects that model and every model below it, and a deploy run with `--full-refresh` rebuilds all of them. None of their output changes, because a comment moves no data. With this package the edited model rebuilds, reads `unchanged`, and its guarded children skip.
+
+It saves work only when a rebuild would produce the same table:
+
+| Situation | What happens |
+|---|---|
+| A rebuild produces the same table | Its guarded children skip. This is the only case that saves anything |
+| A rebuild changes rows at or below the watermark | The verdict is `modified` and the children build as normal |
+| The table is created or replaced (`create or replace`, or a stock incremental under `--full-refresh`) | Time Travel restarts with the new object, the verdict is `new`, and the children build. Rewrite in place (truncate and insert, `insert overwrite`, `merge`) to get skips |
+| A parent only gained rows (`appended`) | The children skip and keep their last build's content. A child that joins the parent as a lookup, or aggregates it, can be stale until it next builds |
+| A run that exists to load new data, such as a nightly build | Leave the guard off. `appended` never blocks, so new rows would not reach the children |
+
 ## Installation
 
 ```yaml
