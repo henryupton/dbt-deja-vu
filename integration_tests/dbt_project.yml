@@ -27,6 +27,9 @@ seeds:
       +post-hook:
         - "alter table {{ this }} set data_retention_time_in_days = 1"
         - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+    # The fp_prune group's frozen inputs: never fingerprinted, shared by both arms.
+    fingerprint_prune:
+      +schema: prune_input
 
 models:
   dbt_deja_vu_integration_tests:
@@ -43,6 +46,13 @@ models:
         - "alter table {{ this }} set data_retention_time_in_days = 1"
         - "alter table {{ this }} set row_timestamp = false"
         - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+    # The fp_prune group: one schema per arm (see macros/fp_prune.sql), whose one-day retention every table inherits.
+    fingerprint_prune:
+      +schema: prune_arm
+      +post-hook:
+        - "{{ dbt_deja_vu.fingerprint_post(this) }}"
+    fingerprint_prune_input:
+      +schema: prune_input
 
 tests:
   dbt_deja_vu_integration_tests:

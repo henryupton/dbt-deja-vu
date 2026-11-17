@@ -1,0 +1,4 @@
+node_name,verdict
+fp_mask_parent,unchanged
+fp_mask_child_of_stamp,skipped
+fp_mask_child_of_clock,new

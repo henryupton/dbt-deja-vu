@@ -1,0 +1,9 @@
+version: 2
+
+models:
+  - name: fp_prune_stg_reports
+    description: Frozen staging for the fp_prune group's reports, built into the shared input schema between scenarios with the fingerprint off; no deploy selects it.
+  - name: fp_prune_stg_agent_lifecycle
+    description: Frozen staging for fp_prune_dim_agent; fp_prune_stage lands the backdated, forward-dated and new-agent versions.
+  - name: fp_prune_stg_country_lifecycle
+    description: Frozen staging for fp_prune_dim_country; never changes.

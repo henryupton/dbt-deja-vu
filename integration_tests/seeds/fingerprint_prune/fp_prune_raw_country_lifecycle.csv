@@ -1,0 +1,5 @@
+country_code,country_name,region,_updated_at,_loaded_at,_stage
+NZ,New Zealand,APAC,2026-01-05 00:00:00+0000,2026-01-05 01:00:00+0000,0
+AU,Australia,APAC,2026-01-05 00:00:00+0000,2026-01-05 01:00:00+0000,0
+GB,United Kingdom,EMEA,2026-01-05 00:00:00+0000,2026-01-05 01:00:00+0000,0
+GB,United Kingdom,Europe,2026-03-01 00:00:00+0000,2026-03-01 01:00:00+0000,0

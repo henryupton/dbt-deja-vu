@@ -1,0 +1,5 @@
+node_name,verdict
+fp_sql_parent,unchanged
+fp_sql_child,new
+fp_sql_child_of_macro,skipped
+fp_sql_child_of_var,skipped

@@ -2,7 +2,7 @@
     config(
         materialized='view',
         enabled=(var('fingerprint', false) | string | lower) in ['true', '1'],
-        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge']
+        tags=['fingerprint', 'fp_overwrite', 'fp_evolve', 'fp_guard', 'fp_late', 'fp_edp', 'fp_edge', 'fp_knob', 'fp_sql', 'fp_fault', 'fp_settle', 'fp_mask', 'fp_prune']
     )
 }}
 
@@ -49,6 +49,38 @@
 -- depends_on: {{ ref('fp_edge_nulls') }}
 -- depends_on: {{ ref('fp_edge_ntz') }}
 -- depends_on: {{ ref('fp_edge_date') }}
+-- depends_on: {{ ref('fp_knob_parent') }}
+-- depends_on: {{ ref('fp_knob_child') }}
+-- depends_on: {{ ref('fp_knob_hookless') }}
+-- depends_on: {{ ref('fp_knob_child_of_hookless') }}
+-- depends_on: {{ ref('fp_knob_wallclock') }}
+-- depends_on: {{ ref('fp_knob_scd2') }}
+-- depends_on: {{ ref('fp_knob_child_of_scd2') }}
+-- depends_on: {{ ref('fp_sql_parent') }}
+-- depends_on: {{ ref('fp_sql_child') }}
+-- depends_on: {{ ref('fp_sql_child_of_macro') }}
+-- depends_on: {{ ref('fp_sql_child_of_var') }}
+-- depends_on: {{ ref('fp_fault_parent') }}
+-- depends_on: {{ ref('fp_fault_child') }}
+-- depends_on: {{ ref('fp_fault_parked') }}
+-- depends_on: {{ ref('fp_fault_child_of_parked') }}
+-- depends_on: {{ ref('fp_settle_parent') }}
+-- depends_on: {{ ref('fp_settle_child') }}
+-- depends_on: {{ ref('fp_mask_parent') }}
+-- depends_on: {{ ref('fp_mask_child_of_stamp') }}
+-- depends_on: {{ ref('fp_mask_child_of_clock') }}
+-- depends_on: {{ ref('fp_prune_evt_report') }}
+-- depends_on: {{ ref('fp_prune_int_adh') }}
+-- depends_on: {{ ref('fp_prune_dim_agent') }}
+-- depends_on: {{ ref('fp_prune_fct_daily') }}
+-- depends_on: {{ ref('fp_prune_dm_fct') }}
+-- depends_on: {{ ref('fp_prune_dm_dim_agent') }}
+-- depends_on: {{ ref('fp_prune_dim_agent_current') }}
+-- depends_on: {{ ref('fp_prune_rpt') }}
+-- depends_on: {{ ref('fp_prune_dim_country') }}
+-- depends_on: {{ ref('fp_prune_dm_country') }}
+-- depends_on: {{ ref('fp_prune_dashboard') }}
+-- depends_on: {{ ref('fp_prune_striking') }}
 {% if var('fp_enable_late_child', false) %}
 -- depends_on: {{ ref('fp_child_late') }}
 {% endif %}

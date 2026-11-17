@@ -17,13 +17,8 @@
       {{ get_create_table_as_sql(False, target_relation, sql) }}
     {%- endcall -%}
   {%- else -%}
-    {%- set quoted = [] -%}
-    {%- for c in adapter.get_columns_in_relation(existing_relation) -%}{%- do quoted.append(adapter.quote(c.name)) -%}{%- endfor -%}
-    {%- set cols_csv = quoted | join(', ') -%}
     {%- call statement('main') -%}
-      insert overwrite into {{ target_relation }} ({{ cols_csv }})
-      select {{ cols_csv }}
-      from ({{ sql }})
+      {{ fp_insert_overwrite_sql(target_relation, existing_relation, sql) }}
     {%- endcall -%}
   {%- endif -%}
 
@@ -32,3 +27,14 @@
   {{ return({'relations': [target_relation]}) }}
 
 {% endmaterialization %}
+
+{#
+  The insert overwrite overwrite_table and guarded_overwrite share. The model SQL sits on its own line, so a
+  trailing -- comment in it cannot swallow the closing bracket.
+#}
+{% macro fp_insert_overwrite_sql(target_relation, existing_relation, sql) %}
+  {%- set quoted = [] -%}
+  {%- for c in adapter.get_columns_in_relation(existing_relation) -%}{%- do quoted.append(adapter.quote(c.name)) -%}{%- endfor -%}
+  {%- set cols_csv = quoted | join(', ') -%}
+  {{ return("insert overwrite into " ~ target_relation ~ " (" ~ cols_csv ~ ")\nselect " ~ cols_csv ~ "\nfrom (\n" ~ sql ~ "\n)") }}
+{% endmacro %}

@@ -4,27 +4,58 @@
   Vars (all top-level, so they can be set in dbt_project.yml or with --vars):
     fingerprint (bool):                          master switch, default false.
     fingerprint_skip_unchanged_upstream (bool):  lets fingerprint_should_skip() answer true, default false.
+    fingerprint_commands (list):                 the commands that register, compared with flags.WHICH, default
+                                                 [build, run, seed, snapshot, retry]. Any other command (compile,
+                                                 docs generate, show, test, ls, parse, run-operation) registers
+                                                 nothing.
     deploy_id (string):                          groups one deploy's ledger rows, default invocation_id.
     fingerprint_schema (string):                 ledger schema, default target.schema.
     fingerprint_loaded_at_column (string):       row arrival column, default _loaded_at.
     fingerprint_exclude (list):                  columns never hashed, default [_batched_at, _written_at, _synthesised_at].
     fingerprint_exclude_scd_columns (bool):      also leave out the scd validity columns on every model, default
-                                                 true. Names come from dbt-scd2-utils' is_current_column and
+                                                 false. Names come from dbt-scd2-utils' is_current_column and
                                                  valid_to_column (model config, then the dbt_scd2_utils var),
-                                                 defaulting to _is_current and _valid_to. A new version closing
-                                                 an old row then reads appended rather than modified. The cost is that a logic change
-                                                 which only moves validity reads unchanged; set false where scd2_join
-                                                 consumers depend on those columns.
+                                                 defaulting to _is_current and _valid_to. Off, a new version that
+                                                 closes an old row reads modified, which is what an as-of join on
+                                                 _valid_to needs. On, it reads appended, and a change that only
+                                                 moves validity reads unchanged, so a child that reads those
+                                                 columns can skip on stale validity. Turn it on only where no
+                                                 child reads them.
+    fingerprint_exclude_materializations (list): materializations never fingerprinted, default []. Their nodes
+                                                 are not registered and their post-hook is a no-op, so a type that
+                                                 never runs hooks (streamlit, semantic_view, agent, ...) no longer
+                                                 sits pending. A child of one never skips: it was rebuilt and
+                                                 nothing fingerprinted it.
     fingerprint_select_tag (string):             fallback selection for runtimes without selected_resources: every
                                                  node carrying the tag is registered, default none.
+    fingerprint_sql_mask_run_started_at (list): strftime templates whose run_started_at rendering is masked out of
+                                                 the compiled SQL hash, default []. For an audit stamp such as
+                                                 "'%Y-%m-%dT%H:%M:%S.%fZ'::timestamp_tz as _batched_at", which would
+                                                 otherwise build its model every run; name the alias so a clock read
+                                                 in logic is never masked.
+    fingerprint_contain_register_failure (bool): default false, so a registration failure stops the run before any
+                                                 node builds. On, it logs a warning and the run builds where the
+                                                 ledger cannot see it, so a later run can skip a child of anything
+                                                 it rebuilt on stale content.
+    fingerprint_register_batch_size (int):       rows per registration insert, default 200. Snowflake cannot retry
+                                                 a statement over 1 MB, which one insert reaches at about 500
+                                                 nodes; lower it for very wide tables, whose shape rides on the row.
 
-  Per-model meta: fingerprint_loaded_at, fingerprint_exclude (added to the global list).
+  Per-model meta: fingerprint_loaded_at, fingerprint_exclude (added to the global list), fingerprint_skip (false
+  keeps fingerprint_should_skip() from skipping the node; it is still fingerprinted for its children).
 
-  The ledger is append-only: registration writes a `pending` row, the post-hook and the guard append the verdict
-  row. Per deploy and node the latest real verdict counts; a `skipped` row stands only when the node recorded no
-  verdict in that deploy, and `pending` only when nothing else exists. A verdict is measured against the deploy's
-  snapshot, so it is cumulative over every step and retry of the deploy, and a later skip wrote nothing. Nothing
-  updates or deletes, so threads finishing together never queue on a table lock.
+  The ledger is append-only: registration writes a `pending` row (a `reselected` row when an earlier run of the
+  deploy registered the node), the post-hook and the guard append the verdict row. Per deploy and node the latest
+  real verdict counts; a `skipped` row stands only when the node recorded no verdict in that deploy, `pending` only
+  when nothing else exists, and `reselected` never. A verdict is measured against the deploy's snapshot, so it is
+  cumulative over every step and retry of the deploy, and a later skip wrote nothing. Nothing updates or deletes,
+  so threads finishing together never queue on a table lock. Every row carries invocation_id, the run that wrote
+  it; verdict and skip rows carry sql_hash, the md5 of the node's compiled SQL (fingerprint_sql_hash). A ledger
+  created before either column gains it at the next registration.
+
+  Every statement the hooks and the guard issue goes through fingerprint_try_query, so a failure is reported back
+  instead of raised and never fails a node. Each caller resolves it in the blocking direction: registration stops
+  the run (or, contained, stops registering), the post-hook records `error`, the guard builds.
 #}
 
 {# A var as a bool on both engines. dbt-core's macro environment leaves `as_bool` as identity, so "false" would be truthy. #}
@@ -40,8 +71,79 @@
   {{ return(dbt_deja_vu.fingerprint_flag('fingerprint_skip_unchanged_upstream')) }}
 {% endmacro %}
 
+{# The dbt command this invocation runs (flags.WHICH, e.g. 'build' or 'compile'), lower-cased; none when the engine does not expose it. #}
+{% macro fingerprint_command() %}
+  {%- set which = flags.WHICH if (flags is defined and flags.WHICH is defined) else none -%}
+  {{ return((which | string | lower) if which is not none else none) }}
+{% endmacro %}
+
+{#
+  True when the command builds, i.e. flags.WHICH is in the fingerprint_commands var. compile, docs generate, show
+  and test run on-run-start too, and a registration there would sit pending and block every child. An engine that
+  does not expose the command counts as building: leaving a real build out of the ledger is the unsafe direction.
+#}
+{% macro fingerprint_building_command() %}
+  {%- set which = dbt_deja_vu.fingerprint_command() -%}
+  {%- if which is none -%}
+    {{ return(true) }}
+  {%- endif -%}
+  {%- set commands = var('fingerprint_commands', ['build', 'run', 'seed', 'snapshot', 'retry']) -%}
+  {%- if commands is string -%}{%- set commands = [commands] -%}{%- endif -%}
+  {{ return(which in (commands | map('string') | map('lower') | list)) }}
+{% endmacro %}
+
 {% macro fingerprint_deploy_id() %}
   {{ return(var('deploy_id', invocation_id)) }}
+{% endmacro %}
+
+{#
+  The unique_ids this run builds: selected_resources, or for runtimes without it every node carrying the
+  fingerprint_select_tag var. Registration enrols these, and the guard reads it to tell a parent built in this run
+  from one that was not.
+#}
+{% macro fingerprint_selected_ids() %}
+  {%- set selected = [] -%}
+  {%- if selected_resources is defined and selected_resources -%}
+    {%- for uid in selected_resources -%}{%- do selected.append(uid) -%}{%- endfor -%}
+  {%- elif var('fingerprint_select_tag', none) is not none and graph is defined -%}
+    {%- for uid, n in graph.nodes.items() -%}
+      {%- if var('fingerprint_select_tag') in (n.tags or []) -%}{%- do selected.append(uid) -%}{%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {{ return(selected) }}
+{% endmacro %}
+
+{#
+  Runs `sql` inside a Snowflake Scripting block whose exception branch returns a sentinel row instead of raising,
+  so the caller decides what a failed statement means (Jinja has no try). Statements in `before` run
+  first in the same block: a SHOW whose result_scan(last_query_id()) the query reads, or an insert it aggregates.
+  Each statement travels as a string and runs through `execute immediate`, so even a syntax error reaches the
+  handler. The block is a single-quoted literal, never $$: a $$ inside a $$ block came back as an empty result with
+  no error on Fusion. Returns {'ok', 'table', 'code', 'error'}: table is the last statement's result when ok; code
+  is Snowflake's sqlcode, and error "<sqlcode>: <sqlerrm>" on one line, capped at 1,000 characters. A block costs
+  about 0.35 s of Snowflake time over the bare statement, so callers fold dependent statements into one call.
+#}
+{% macro fingerprint_try_query(sql, before=none) %}
+  {%- set sentinel = '__fingerprint_try_error__' -%}
+  {%- set declare = ['res resultset', 'q varchar default ' ~ dbt_deja_vu.fingerprint_lit(sql)] -%}
+  {%- set run_first = [] -%}
+  {%- for stmt in (before or []) -%}
+    {%- do declare.append('b' ~ loop.index ~ ' varchar default ' ~ dbt_deja_vu.fingerprint_lit(stmt)) -%}
+    {%- do run_first.append('execute immediate :b' ~ loop.index ~ ';') -%}
+  {%- endfor -%}
+  {%- set block = "declare " ~ (declare | join('; ')) ~ "; begin " ~ (run_first | join(' '))
+      ~ " res := (execute immediate :q); return table(res);"
+      ~ " exception when other then let code varchar := sqlcode; let msg varchar := sqlerrm;"
+      ~ " res := (select '" ~ sentinel ~ "' as fingerprint_try_error, :code as code, :msg as message); return table(res);"
+      ~ " end;" -%}
+  {%- set res = run_query("execute immediate " ~ dbt_deja_vu.fingerprint_lit(block)) -%}
+  {%- if (res.columns | length) == 3 and (res.columns[0].name | upper) == 'FINGERPRINT_TRY_ERROR'
+      and (res.rows | length) == 1 and res.rows[0][0] == sentinel -%}
+    {%- set message = (res.rows[0][2] | string) | replace('\r', ' ') | replace('\n', ' ') -%}
+    {{ return({'ok': false, 'table': none, 'code': res.rows[0][1] | string,
+               'error': ((res.rows[0][1] | string) ~ ': ' ~ message)[:1000]}) }}
+  {%- endif -%}
+  {{ return({'ok': true, 'table': res, 'code': none, 'error': none}) }}
 {% endmacro %}
 
 {% macro fingerprint_schema() %}
@@ -86,7 +188,7 @@
 {% macro fingerprint_excluded_columns(node) %}
   {%- set cols = [] -%}
   {%- for c in var('fingerprint_exclude', ['_batched_at', '_written_at', '_synthesised_at']) -%}{%- do cols.append(c) -%}{%- endfor -%}
-  {%- if dbt_deja_vu.fingerprint_flag('fingerprint_exclude_scd_columns', true) -%}
+  {%- if dbt_deja_vu.fingerprint_flag('fingerprint_exclude_scd_columns', false) -%}
     {%- do cols.append(dbt_deja_vu.fingerprint_scd_column(node, 'is_current_column', '_is_current')) -%}
     {%- do cols.append(dbt_deja_vu.fingerprint_scd_column(node, 'valid_to_column', '_valid_to')) -%}
   {%- endif -%}
@@ -100,18 +202,51 @@
 
 {#
   The row that counts for a deploy and node: the latest real verdict; a `skipped` row only when the node recorded
-  no verdict in that deploy; `pending` only when nothing else exists. Goes after the where clause.
+  no verdict in that deploy; `pending` only when nothing else exists. A `reselected` row, a later run's
+  registration, never counts. Goes after the where clause.
 #}
 {% macro fingerprint_latest_row() %}
   {{ return(" qualify row_number() over (partition by deploy_id, node_id order by"
-      ~ " case verdict when 'pending' then 2 when 'skipped' then 1 else 0 end,"
+      ~ " case verdict when 'reselected' then 3 when 'pending' then 2 when 'skipped' then 1 else 0 end,"
       ~ " finished_at desc nulls last, registered_at desc) = 1") }}
+{% endmacro %}
+
+{# Registration rows: the deploy's first (`pending`) and each later run's (`reselected`). Neither is an outcome. #}
+{% macro fingerprint_registration_verdicts() %}
+  {{ return("('pending', 'reselected')") }}
+{% endmacro %}
+
+{#
+  Counts the rows of `node_rel` matching `where` that are registrations no verdict or skip settled: nothing in the
+  same deploy finished after them. Each run appends one registration per node it selects, so an unsettled one is a
+  run that may have written the node's table and recorded nothing (a lost verdict, a failed build).
+#}
+{% macro fingerprint_unsettled_sql(node_rel, where) %}
+  {%- set reg = dbt_deja_vu.fingerprint_registration_verdicts() -%}
+  {{ return("(select count(*) from " ~ node_rel ~ " r where r.verdict in " ~ reg ~ " and " ~ where
+      ~ " and not exists (select 1 from " ~ node_rel ~ " o where o.deploy_id = r.deploy_id and o.node_id = r.node_id"
+      ~ " and o.verdict not in " ~ reg ~ " and o.finished_at > r.registered_at))") }}
 {% endmacro %}
 
 {# database.schema.alias as the ledger records it, from a graph node or the model context. #}
 {% macro fingerprint_relation_name(node) %}
   {%- set alias = node.alias if (node.alias is defined and node.alias) else node.name -%}
   {{ return(node.database ~ '.' ~ node.schema ~ '.' ~ alias) }}
+{% endmacro %}
+
+{#
+  True when the node's materialization is in the fingerprint_exclude_materializations var. Such a node is never
+  registered and its post-hook is a no-op: types that never run hooks (streamlit, semantic_view, ...) would
+  otherwise sit pending for good.
+#}
+{% macro fingerprint_materialization_excluded(node) %}
+  {%- set excluded = var('fingerprint_exclude_materializations', []) or [] -%}
+  {%- if excluded is string -%}{%- set excluded = [excluded] -%}{%- endif -%}
+  {%- if excluded | length == 0 or node is none or node.config is not defined or node.config is none
+      or node.config.materialized is not defined -%}
+    {{ return(false) }}
+  {%- endif -%}
+  {{ return((node.config.materialized | string | lower) in (excluded | map('string') | map('lower') | list)) }}
 {% endmacro %}
 
 {% macro fingerprint_is_ephemeral(node) %}
@@ -167,12 +302,54 @@
   {{ return(none) }}
 {% endmacro %}
 
-{# SQL literal helpers: none -> null, strings quoted and escaped, everything else as-is. #}
+{#
+  md5 of the node's compiled SQL, the text its materialization runs: every macro it calls, var it renders and
+  ephemeral it reads, rendered, with any fingerprint_sql_mask_run_started_at rendering masked. None when the node
+  carries no compiled SQL (graph nodes on Fusion do not; the model in a materialization or hook context does, the
+  same text as `sql`). Hashed in Jinja, so arbitrary SQL text never has to survive a Snowflake string literal. The
+  guard compares it with the hash at the node's last build.
+#}
+{% macro fingerprint_sql_hash(node) %}
+  {%- if node is none or local_md5 is not defined -%}
+    {{ return(none) }}
+  {%- endif -%}
+  {%- set code = node.compiled_code if (node.compiled_code is defined and node.compiled_code is not none)
+      else (node.compiled_sql if (node.compiled_sql is defined and node.compiled_sql is not none) else none) -%}
+  {%- if code is none or (code | string | trim) == '' -%}
+    {{ return(none) }}
+  {%- endif -%}
+  {{ return(local_md5(dbt_deja_vu.fingerprint_sql_masked(code | string))) }}
+{% endmacro %}
+
+{#
+  The compiled SQL with each rendering of a fingerprint_sql_mask_run_started_at template replaced by the template
+  itself: run_started_at.strftime(template) is what an audit-columns macro renders, so the text that moves with the
+  run start drops out of the hash and nothing else does. Name the stamp's alias in the template, or a clock read
+  in logic rendered in the same format is masked too and its model can skip on stale output.
+#}
+{% macro fingerprint_sql_masked(code) %}
+  {%- set templates = var('fingerprint_sql_mask_run_started_at', []) or [] -%}
+  {%- if templates is string -%}{%- set templates = [templates] -%}{%- endif -%}
+  {%- if templates | length == 0 or run_started_at is not defined or run_started_at is none -%}
+    {{ return(code) }}
+  {%- endif -%}
+  {%- set masked = {'sql': code} -%}
+  {%- for t in templates -%}
+    {%- do masked.update({'sql': masked.sql | replace(run_started_at.strftime(t | string), t | string)}) -%}
+  {%- endfor -%}
+  {{ return(masked.sql) }}
+{% endmacro %}
+
+{#
+  SQL literal helpers: none -> null, strings quoted and escaped, everything else as-is. Snowflake reads backslash
+  escapes in single-quoted strings, so backslashes are doubled with the quotes: any text round-trips, which
+  fingerprint_try_query relies on to pass whole statements (and Snowflake error messages) as literals.
+#}
 {% macro fingerprint_lit(value) %}
   {%- if value is none -%}
     {{ return('null') }}
   {%- elif value is string -%}
-    {{ return("'" ~ (value | replace("'", "''")) ~ "'") }}
+    {{ return("'" ~ (value | replace("\\", "\\\\") | replace("'", "''")) ~ "'") }}
   {%- elif value is sameas true -%}
     {{ return('true') }}
   {%- elif value is sameas false -%}
@@ -252,42 +429,48 @@
   name is re-checked. Returns {'found', 'kind', 'replaced', 'retention', 'expired', 'row_timestamp', 'is_iceberg',
   'is_dynamic'} with kind 'table', 'view' or none. expired is true when the snapshot is older than the table's
   Time Travel retention (a stable deploy_id re-run days later), where an `at()` read would fail the node.
-  row_timestamp is read here because METADATA$ROW_LAST_COMMIT_TIME is an invalid identifier on a table without it,
-  and a hook error fails the node.
+  row_timestamp is read here because METADATA$ROW_LAST_COMMIT_TIME is an invalid identifier on a table without it.
+  The SHOW and its result_scan share one fingerprint_try_query block. A failed lookup returns {'error': message}
+  alone; every other answer carries 'error': none.
 #}
 {% macro fingerprint_object_info(relation, snap) %}
   {%- set name_lit = dbt_deja_vu.fingerprint_lit(relation.identifier) -%}
   {%- set in_schema = " in schema " ~ relation.database ~ "." ~ relation.schema -%}
-  {%- set tables = run_query("show tables like " ~ name_lit ~ in_schema) -%}
-  {%- if tables.rows | length > 0 -%}
-    {# SHOW TABLES reports retention_time as varchar. #}
-    {%- set info = run_query(
-        "select \"kind\", \"retention_time\", \"created_on\" > " ~ snap ~ " as replaced,"
-        ~ " \"row_timestamp\", \"is_iceberg\", \"is_dynamic\","
-        ~ " " ~ snap ~ " < dateadd('day', -try_to_number(\"retention_time\"::varchar), current_timestamp()) as expired"
-        ~ " from table(result_scan(last_query_id())) where upper(\"name\") = upper(" ~ name_lit ~ ")") -%}
-    {%- if info.rows | length > 0 -%}
-      {%- set r = info.rows[0] -%}
-      {{ return({'found': true, 'kind': 'table', 'replaced': r[2], 'retention': r[1] | int,
-                 'expired': (r[6] | string | lower) == 'true',
-                 'row_timestamp': (r[3] | string | upper) == 'ON',
-                 'is_iceberg': (r[4] | string | upper) == 'Y',
-                 'is_dynamic': (r[5] | string | upper) == 'Y'}) }}
-    {%- endif -%}
+  {# SHOW TABLES reports retention_time as varchar. #}
+  {%- set info = dbt_deja_vu.fingerprint_try_query(
+      "select \"kind\", \"retention_time\", \"created_on\" > " ~ snap ~ " as replaced,"
+      ~ " \"row_timestamp\", \"is_iceberg\", \"is_dynamic\","
+      ~ " " ~ snap ~ " < dateadd('day', -try_to_number(\"retention_time\"::varchar), current_timestamp()) as expired"
+      ~ " from table(result_scan(last_query_id())) where upper(\"name\") = upper(" ~ name_lit ~ ")",
+      before=["show tables like " ~ name_lit ~ in_schema]) -%}
+  {%- if not info.ok -%}
+    {{ return({'error': info.error}) }}
   {%- endif -%}
-  {%- set views = run_query("show views like " ~ name_lit ~ in_schema) -%}
+  {%- if info.table.rows | length > 0 -%}
+    {%- set r = info.table.rows[0] -%}
+    {{ return({'found': true, 'kind': 'table', 'replaced': r[2], 'retention': r[1] | int,
+               'expired': (r[6] | string | lower) == 'true',
+               'row_timestamp': (r[3] | string | upper) == 'ON',
+               'is_iceberg': (r[4] | string | upper) == 'Y',
+               'is_dynamic': (r[5] | string | upper) == 'Y', 'error': none}) }}
+  {%- endif -%}
+  {%- set views = dbt_deja_vu.fingerprint_try_query("show views like " ~ name_lit ~ in_schema) -%}
+  {%- if not views.ok -%}
+    {{ return({'error': views.error}) }}
+  {%- endif -%}
   {%- set vidx = {} -%}
-  {%- for name in views.columns | map(attribute='name') -%}{%- do vidx.update({name | lower: loop.index0}) -%}{%- endfor -%}
-  {%- for row in views.rows -%}
+  {%- for name in views.table.columns | map(attribute='name') -%}{%- do vidx.update({name | lower: loop.index0}) -%}{%- endfor -%}
+  {%- for row in views.table.rows -%}
     {%- if (row[vidx['name']] | upper) == (relation.identifier | upper) -%}
-      {{ return({'found': true, 'kind': 'view', 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false}) }}
+      {{ return({'found': true, 'kind': 'view', 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false, 'error': none}) }}
     {%- endif -%}
   {%- endfor -%}
-  {{ return({'found': false, 'kind': none, 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false}) }}
+  {{ return({'found': false, 'kind': none, 'replaced': none, 'retention': none, 'expired': false, 'row_timestamp': none, 'is_iceberg': false, 'is_dynamic': false, 'error': none}) }}
 {% endmacro %}
 
+{# Creates the ledger tables if missing and adds sql_hash and invocation_id to an older ledger. Returns none, or the error that stopped it. #}
 {% macro fingerprint_ledger_ddl(node_rel, seg_rel) %}
-  {%- do run_query("
+  {%- set node_ddl = "
     create table if not exists " ~ node_rel ~ " (
       deploy_id         varchar,
       node_id           varchar,
@@ -311,9 +494,11 @@
       buckets_changed   number,
       pre_shape         varchar,
       post_shape        varchar,
-      checksum          varchar
-    )") -%}
-  {%- do run_query("
+      checksum          varchar,
+      sql_hash          varchar,
+      invocation_id     varchar
+    )" -%}
+  {%- set seg_ddl = "
     create table if not exists " ~ seg_rel ~ " (
       deploy_id   varchar,
       node_id     varchar,
@@ -324,5 +509,20 @@
       post_hash   number,
       changed     boolean,
       hashed_at   timestamp_tz
-    )") -%}
+    )" -%}
+  {# An older ledger predates sql_hash or invocation_id. SHOW is metadata-only, so the steady state issues no DDL against a shared ledger. #}
+  {%- set shown = dbt_deja_vu.fingerprint_try_query("show columns in table " ~ node_rel, before=[node_ddl, seg_ddl]) -%}
+  {%- if not shown.ok -%}
+    {{ return(shown.error) }}
+  {%- endif -%}
+  {%- set have = dbt_deja_vu.fingerprint_columns_from_show(shown.table) | map('upper') | list -%}
+  {%- for col in ['sql_hash', 'invocation_id'] -%}
+    {%- if (col | upper) not in have -%}
+      {%- set added = dbt_deja_vu.fingerprint_try_query("alter table " ~ node_rel ~ " add column if not exists " ~ col ~ " varchar") -%}
+      {%- if not added.ok -%}
+        {{ return(added.error) }}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{ return(none) }}
 {% endmacro %}

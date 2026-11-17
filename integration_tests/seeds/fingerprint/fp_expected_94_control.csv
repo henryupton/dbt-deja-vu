@@ -1,0 +1,12 @@
+node_name,verdict
+fp_prune_evt_report,new
+fp_prune_int_adh,unchanged
+fp_prune_dim_agent,modified
+fp_prune_fct_daily,modified
+fp_prune_dm_fct,modified
+fp_prune_dm_dim_agent,modified
+fp_prune_dim_agent_current,new
+fp_prune_rpt,unchanged
+fp_prune_dim_country,unchanged
+fp_prune_dm_country,unchanged
+fp_prune_striking,unchanged
